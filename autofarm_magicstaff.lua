@@ -1,47 +1,58 @@
 local bot = getBot(SLOT_ID)
 if not bot then return end
 
-local BLOCK_ID = 2735
+-------------------------------------------------
+-- CONFIG
+-------------------------------------------------
 
 local WORLD = "TEST02"
-local STORAGE_WORLD = "GOOSE"
-local STORAGE_PORTAL = "qwerty4"
+local BLOCK_ID = 2735
 
-local OWNER = "Snorf"
+local X1, X2 = 0, 79
+local Y1, Y2 = 3, 5
 
-local MAX_SEEDS = 500
-local KEEP_SEEDS = 140
+local LOCK_X, LOCK_Y = 40, 5
+local PORTAL_X, PORTAL_Y = 40, 6
 
-local X_MIN = 0
-local X_MAX = 79
+local RECONNECT_DELAY = 3000
 
-local Y_MIN = 3
-local Y_MAX = 5
+-------------------------------------------------
+-- SAFE TILE
+-------------------------------------------------
 
-local WALK_Y = 4
+local function safe(x, y)
+    if x == LOCK_X and y == LOCK_Y then return false end
+    if x == PORTAL_X and y == PORTAL_Y then return false end
+    return true
+end
 
-local DELAY_HIT = 150
-local DELAY_MOVE = 120
+-------------------------------------------------
+-- CONNECT
+-------------------------------------------------
+
+local function ensure()
+    while bot:state() ~= "InWorld" do
+        if bot:state() == "Failed" then
+            bot:connect()
+        elseif bot:state() == "MenuIdle" then
+            bot:warp(WORLD)
+        end
+        sleep_ms(RECONNECT_DELAY)
+    end
+end
 
 -------------------------------------------------
 -- INVENTORY
 -------------------------------------------------
 
-local function count_items()
+local function count_blocks()
     local blocks = 0
-    local seeds = 0
-
     for _, item in ipairs(bot:get_inventory()) do
-        if item.id == BLOCK_ID then
-            if item.inventory_type == 0 then
-                blocks = blocks + item.amount
-            elseif item.inventory_type == 2 then
-                seeds = seeds + item.amount
-            end
+        if item.id == BLOCK_ID and item.inventory_type == 0 then
+            blocks = blocks + item.amount
         end
     end
-
-    return blocks, seeds
+    return blocks
 end
 
 -------------------------------------------------
@@ -50,191 +61,165 @@ end
 
 local function go(x, y)
     if bot:isWalkable(x, y) then
-        pcall(function()
-            bot:find_path(x, y)
-        end)
-        sleep_ms(DELAY_MOVE)
+        bot:find_path(x, y)
+        sleep_ms(150)
     end
 end
 
 -------------------------------------------------
--- BREAK SEED CLEAN
+-- 1. INSTA BREAK ALL BLOCKS
 -------------------------------------------------
-
-local function clean_seeds()
-
-    log("CLEAN SEEDS")
-
-    local w = bot:get_world()
-
-    for x = X_MIN, X_MAX do
-        for y = Y_MIN, Y_MAX do
-
-            if y >= Y_MIN and y <= Y_MAX then
-
-                local s = w.seed_at(x, y)
-
-                if s then
-                    go(x, y)
-                    bot:hit_block(0, 0)
-                    sleep_ms(120)
-                end
-            end
-        end
-    end
-
-    bot:collectAll()
-    sleep_ms(300)
-end
-
--------------------------------------------------
--- BREAK BLOCKS (DO 0)
--------------------------------------------------
-
-local function break_column(x)
-
-    bot:send("HB", {x = x, y = WALK_Y + 1})
-    sleep_ms(DELAY_HIT)
-
-    bot:send("HB", {x = x, y = WALK_Y})
-    sleep_ms(DELAY_HIT)
-
-    bot:send("HB", {x = x, y = WALK_Y - 1})
-    sleep_ms(DELAY_HIT)
-end
 
 local function break_all_blocks()
 
-    log("BREAK START")
+    ensure()
 
     while true do
 
-        local blocks = count_items()
+        local blocks = count_blocks()
+        if blocks <= 0 then break end
 
-        if blocks <= 0 then
-            break
-        end
+        local p = bot:pos()
+        local x, y = p.tile_x, p.tile_y
 
-        for x = X_MIN, X_MAX do
-
-            if count_items() <= 0 then
-                break
+        -- ломаем вокруг позиции (инста)
+        local function burst(tx, ty)
+            for i = 1, 30 do
+                bot:send("SB", {
+                    x = tx,
+                    y = ty,
+                    BlockType = BLOCK_ID
+                })
+                for j = 1, 4 do
+                    bot:send("HB", {x = tx, y = ty})
+                end
             end
-
-            go(x, WALK_Y)
-            break_column(x)
         end
+
+        burst(x - 1, y - 1)
+        burst(x, y - 1)
+        burst(x + 1, y - 1)
+
+        sleep_ms(200)
     end
-
-    log("BREAK DONE")
 end
 
 -------------------------------------------------
--- COLLECT
--------------------------------------------------
-
-local function collect_all()
-
-    bot:collectAll()
-    sleep_ms(200)
-    bot:collectAll()
-end
-
--------------------------------------------------
--- STORAGE
--------------------------------------------------
-
-local function storage_check()
-
-    local _, seeds = count_items()
-
-    if seeds < MAX_SEEDS then
-        return
-    end
-
-    local drop = seeds - KEEP_SEEDS
-
-    log("STORAGE:", drop)
-
-    bot:warp(STORAGE_WORLD)
-    sleep_ms(3000)
-
-    bot:warp(STORAGE_PORTAL)
-    sleep_ms(3000)
-
-    bot:drop(BLOCK_ID, drop, 2)
-
-    sleep_ms(1000)
-
-    bot:warp(WORLD)
-    sleep_ms(3000)
-end
-
--------------------------------------------------
--- PLANT
+-- 2. PLANT SEEDS
 -------------------------------------------------
 
 local function plant_all()
 
-    local _, seeds = count_items()
+    ensure()
 
-    log("PLANT START:", seeds)
+    for y = Y1, Y2 do
+        for x = X1, X2 do
 
-    for x = X_MIN, X_MAX do
+            if safe(x, y) then
 
-        if seeds <= 0 then break end
+                local w = bot:get_world()
 
-        go(x, WALK_Y)
+                if w:fg_at(x, y) == 0 and bot:has_item(BLOCK_ID) then
+                    go(x, y)
+                    sleep_ms(120)
 
-        for y = Y_MIN, Y_MAX do
+                    bot:plant(x, y, BLOCK_ID)
+                    sleep_ms(120)
+                end
 
-            if seeds <= 0 then break end
-
-            local w = bot:get_world()
-            local tile = bot:get_tile(x, y)
-
-            if tile and tile.fg == 0 then
-
-                bot:plant(x, y, BLOCK_ID)
-
-                seeds = seeds - 1
-
-                sleep_ms(140)
             end
+
+        end
+    end
+end
+
+-------------------------------------------------
+-- 3. WAIT GROWTH
+-------------------------------------------------
+
+local function wait_grow()
+
+    ensure()
+
+    while true do
+
+        local w = bot:get_world()
+        local ready = 0
+
+        for y = Y1, Y2 do
+            for x = X1, X2 do
+                if safe(x, y) then
+                    local s = w.seed_at(x, y)
+                    if s and s.ready then
+                        ready = ready + 1
+                    end
+                end
+            end
+        end
+
+        if ready > 0 then
+            sleep_ms(2000)
+        else
+            break
+        end
+    end
+end
+
+-------------------------------------------------
+-- 4. HARVEST ALL
+-------------------------------------------------
+
+local function harvest_all()
+
+    ensure()
+
+    bot:set_auto_collect(true, 200)
+
+    local w = bot:get_world()
+
+    for y = Y1, Y2 do
+        for x = X1, X2 do
+
+            if safe(x, y) then
+                local s = w.seed_at(x, y)
+
+                if s and s.ready then
+                    go(x, y)
+                    sleep_ms(120)
+
+                    bot:hit_block(0, 1)
+                    sleep_ms(180)
+                end
+            end
+
         end
     end
 
-    log("PLANT DONE")
+    sleep_ms(800)
+    bot:collectAll()
+    sleep_ms(400)
+    bot:set_auto_collect(false)
 end
 
 -------------------------------------------------
 -- MAIN LOOP
 -------------------------------------------------
 
-bot:connect()
-sleep_ms(3000)
-
-bot:warp(WORLD)
-sleep_ms(4000)
-
 while true do
 
-    if bot:state() ~= "InWorld" then
-        bot:warp(WORLD)
-        sleep_ms(4000)
-    end
+    ensure()
 
-    clean_seeds()
-
+    -- 1. BREAK FIRST
     break_all_blocks()
 
-    collect_all()
-
-    storage_check()
-
+    -- 2. PLANT
     plant_all()
 
-    collect_all()
+    -- 3. WAIT GROWTH
+    wait_grow()
 
-    sleep_ms(800)
+    -- 4. HARVEST
+    harvest_all()
+
+    sleep_ms(500)
 end
