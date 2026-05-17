@@ -13,7 +13,6 @@ local STORAGE_PORTAL = "qwerty4"
 local OWNER = "Snorf"
 
 local MAX_SEEDS = 500
-local DROP_AMOUNT = 360
 local KEEP_AMOUNT = 140
 
 local FIELD_MIN_X = 0
@@ -24,19 +23,17 @@ local FIELD_MAX_Y = 5
 local LOCK_X, LOCK_Y = 40, 5
 local PORTAL_X, PORTAL_Y = 40, 6
 
-local running = false
-local world_name = WORLD
-
--------------------------------------------------
--- INVENTORY
--------------------------------------------------
+local last_log = 0
 
 local function count_inv()
+
     local blocks = 0
     local seeds = 0
 
     for _, item in ipairs(bot:get_inventory()) do
+
         if item.id == BLOCK_ID then
+
             if item.inventory_type == 0 then
                 blocks = blocks + item.amount
             elseif item.inventory_type == 2 then
@@ -48,48 +45,77 @@ local function count_inv()
     return blocks, seeds
 end
 
--------------------------------------------------
--- SAFE TILE CHECK
--------------------------------------------------
-
 local function can_plant(x, y)
-    if x == LOCK_X and y == LOCK_Y then return false end
-    if x == PORTAL_X and y == PORTAL_Y then return false end
+
+    if x == LOCK_X and y == LOCK_Y then
+        return false
+    end
+
+    if x == PORTAL_X and y == PORTAL_Y then
+        return false
+    end
+
     return true
 end
 
--------------------------------------------------
--- FIELD LOOP
--------------------------------------------------
+local function ensure_world()
+
+    while bot:state() ~= "InWorld" do
+        bot:warp(WORLD)
+        sleep_ms(4000)
+    end
+end
+
+local function walk_to(x, y)
+
+    local ok = pcall(function()
+        bot:find_path(x, y)
+    end)
+
+    if ok then
+        sleep_ms(120)
+    end
+end
 
 local function plant_all()
-    log("PLANT PHASE")
+
+    log("PLANT START")
 
     for y = FIELD_MIN_Y, FIELD_MAX_Y do
+
+        walk_to(1, y)
+
         for x = FIELD_MIN_X, FIELD_MAX_X do
 
             if not can_plant(x, y) then
                 goto continue
             end
 
-            if bot:has_item(BLOCK_ID) then
+            local _, seeds = count_inv()
+
+            if seeds <= 0 then
+                return
+            end
+
+            walk_to(x, y + 1)
+
+            local tile = bot:get_tile(x, y)
+
+            if tile and tile.fg == 0 then
+
                 bot:plant(x, y, BLOCK_ID)
-                sleep_ms(50)
+
+                sleep_ms(70)
             end
 
             ::continue::
         end
     end
+
+    log("PLANT END")
 end
 
--------------------------------------------------
--- HARVEST
--------------------------------------------------
-
-local function harvest_all()
-    log("HARVEST PHASE")
-
-    bot:set_auto_collect(true, 200)
+local function all_ready()
 
     local w = bot:get_world()
 
@@ -102,11 +128,74 @@ local function harvest_all()
 
             local s = w.seed_at(x, y)
 
+            if s and not s.ready then
+                return false
+            end
+
+            ::continue::
+        end
+    end
+
+    return true
+end
+
+local function wait_growth()
+
+    log("WAIT GROWTH")
+
+    bot:respawn()
+
+    while true do
+
+        ensure_world()
+
+        if all_ready() then
+            log("ALL READY")
+            return
+        end
+
+        sleep_ms(5000)
+    end
+end
+
+local function harvest_all()
+
+    log("HARVEST START")
+
+    bot:set_auto_collect(true, 200)
+
+    for y = FIELD_MIN_Y, FIELD_MAX_Y do
+
+        walk_to(1, y + 1)
+
+        for x = FIELD_MIN_X, FIELD_MAX_X do
+
+            if not can_plant(x, y) then
+                goto continue
+            end
+
+            local w = bot:get_world()
+            local s = w.seed_at(x, y)
+
             if s and s.ready then
-                bot:find_path(x, y)
-                sleep_ms(120)
-                bot:hit_block(0, 0)
-                sleep_ms(120)
+
+                walk_to(x, y + 1)
+
+                for i = 1, 4 do
+
+                    bot:send("HB", {
+                        x = x,
+                        y = y
+                    })
+
+                    sleep_ms(70)
+                end
+
+                sleep_ms(150)
+
+                bot:collectAll()
+
+                sleep_ms(100)
             end
 
             ::continue::
@@ -114,11 +203,9 @@ local function harvest_all()
     end
 
     bot:set_auto_collect(false)
-end
 
--------------------------------------------------
--- FAST BREAK (spawn point)
--------------------------------------------------
+    log("HARVEST END")
+end
 
 local function burst(x, y)
 
@@ -131,62 +218,99 @@ local function burst(x, y)
         })
 
         for j = 1, 4 do
-            bot:send("HB", { x = x, y = y })
+
+            bot:send("HB", {
+                x = x,
+                y = y
+            })
         end
     end
 end
 
 local function break_spawn()
 
+    bot:respawn()
+
+    sleep_ms(1000)
+
     local p = bot:pos()
-    local px, py = p.tile_x, p.tile_y
+
+    local px = p.tile_x
+    local py = p.tile_y
 
     burst(px - 1, py - 1)
-    burst(px,     py - 1)
+    burst(px, py - 1)
     burst(px + 1, py - 1)
 
-end
+    sleep_ms(2500)
 
--------------------------------------------------
--- STORAGE SYSTEM
--------------------------------------------------
+    bot:leave()
+
+    sleep_ms(4000)
+
+    bot:warp(WORLD)
+
+    sleep_ms(5000)
+
+    walk_to(px - 1, py)
+    bot:collectAll()
+
+    walk_to(px, py)
+    bot:collectAll()
+
+    walk_to(px + 1, py)
+    bot:collectAll()
+
+    walk_to(px, py)
+
+    sleep_ms(300)
+end
 
 local function do_storage(seeds)
 
-    if seeds < MAX_SEEDS then return end
+    if seeds < MAX_SEEDS then
+        return
+    end
 
-    log("STORAGE TRIGGERED")
+    log("STORAGE START")
 
     bot:warp(STORAGE_WORLD)
-    sleep_ms(3000)
+
+    sleep_ms(4000)
 
     bot:warp(STORAGE_PORTAL)
-    sleep_ms(3000)
+
+    sleep_ms(4000)
 
     local drop = seeds - KEEP_AMOUNT
 
     if drop > 0 then
+
         bot:drop(BLOCK_ID, drop, 2)
-        log("DROPPED SEEDS:", drop)
+
+        sleep_ms(1000)
     end
 
-    bot:warp(world_name)
-    sleep_ms(3000)
-end
+    bot:warp(WORLD)
 
--------------------------------------------------
--- AUTO BAN SYSTEM
--------------------------------------------------
+    sleep_ms(4000)
+
+    log("STORAGE END")
+end
 
 local function setup_ban()
 
     bot:on(events.PACKET_RECEIVED, function(pkt)
 
         for _, id in ipairs(pkt.ids) do
+
             if id == "AnP" then
 
                 local d = pkt.document
-                if not d or not d.m0 then return end
+
+                if not d or not d.m0 then
+                    return
+                end
 
                 local name = d.m0.UN
                 local uid = d.m0.U
@@ -195,58 +319,53 @@ local function setup_ban()
                     return
                 end
 
-                bot:world_ban(uid)
-                log("BANNED:", name)
+                pcall(function()
+                    bot:world_ban(uid)
+                end)
             end
         end
     end)
 end
 
--------------------------------------------------
--- LOG TABLE
--------------------------------------------------
-
-local last_log = 0
-
-local function log_status(blocks, seeds)
+local function log_status()
 
     local now = now_ms()
 
-    if now - last_log < 60000 then return end
+    if now - last_log < 60000 then
+        return
+    end
+
     last_log = now
 
-    log("====================")
-    log("WORLD:", world_name)
+    local blocks, seeds = count_inv()
+
+    log("========== STATUS ==========")
+    log("WORLD:", WORLD)
+    log("STATE:", bot:state())
     log("BLOCKS:", blocks)
     log("SEEDS:", seeds)
-    log("STATE:", bot:state())
-    log("====================")
+    log("============================")
 end
-
--------------------------------------------------
--- MAIN LOOP
--------------------------------------------------
 
 local function main()
 
     setup_ban()
 
     bot:connect()
+
     sleep_ms(3000)
 
     bot:warp(WORLD)
-    sleep_ms(4000)
+
+    sleep_ms(5000)
 
     while true do
 
-        if bot:state() ~= "InWorld" then
-            bot:warp(WORLD)
-            sleep_ms(4000)
-        end
+        ensure_world()
+
+        log_status()
 
         local blocks, seeds = count_inv()
-
-        log_status(blocks, seeds)
 
         if seeds > MAX_SEEDS then
             do_storage(seeds)
@@ -254,15 +373,20 @@ local function main()
 
         if blocks > 0 then
             break_spawn()
-            sleep_ms(2000)
         end
 
-        plant_all()
-        sleep_ms(1000)
+        local _, current_seeds = count_inv()
 
-        harvest_all()
-        sleep_ms(1000)
+        if current_seeds > 0 then
 
+            plant_all()
+
+            wait_growth()
+
+            harvest_all()
+        else
+            sleep_ms(5000)
+        end
     end
 end
 
