@@ -1,48 +1,37 @@
 local bot = getBot(SLOT_ID)
 
-if not bot then
-    return
-end
+if not bot then return end
 
 bot:off(events.PRESEND)
-bot:off(events.PACKET_RECEIVED)
-
-local WORLD_NAME = "TEST02"
-local STORAGE_WORLD = "GOOSE"
-local STORAGE_PORTAL = "qwerty4"
 
 local BLOCK_ID = 2735
 
-local STACK_COUNT = 30
-local HITS_PER_BLOCK = 4
+local WORLD = "TEST02"
+local STORAGE_WORLD = "GOOSE"
+local STORAGE_PORTAL = "qwerty4"
 
-local FARM_Y_START = 3
-local FARM_Y_END = 5
+local OWNER = "Snorf"
 
-local WORLD_MIN_X = 0
-local WORLD_MAX_X = 79
+local MAX_SEEDS = 500
+local DROP_AMOUNT = 360
+local KEEP_AMOUNT = 140
 
-local SEED_KEEP = 140
-local SEED_DROP_AMOUNT = 360
-local SEED_DROP_THRESHOLD = 500
+local FIELD_MIN_X = 0
+local FIELD_MAX_X = 79
+local FIELD_MIN_Y = 3
+local FIELD_MAX_Y = 5
 
-local STATUS_INTERVAL = 60000
-
-local WHITELIST = {
-    ["Snorf"] = true
-}
+local LOCK_X, LOCK_Y = 40, 5
+local PORTAL_X, PORTAL_Y = 40, 6
 
 local running = false
+local world_name = WORLD
 
-local stats = {
-    cycles = 0,
-    planted = 0,
-    harvested = 0,
-    dropped = 0,
-    start = now_ms()
-}
+-------------------------------------------------
+-- INVENTORY
+-------------------------------------------------
 
-local function count_items()
+local function count_inv()
     local blocks = 0
     local seeds = 0
 
@@ -59,291 +48,222 @@ local function count_items()
     return blocks, seeds
 end
 
-local function print_status()
-    local blocks, seeds = count_items()
-    local uptime = math.floor((now_ms() - stats.start) / 60000)
+-------------------------------------------------
+-- SAFE TILE CHECK
+-------------------------------------------------
 
-    log("========== FARM STATUS ==========")
-    log("WORLD:", tostring(bot:get_world_name()))
-    log("STATE:", bot:state())
-    log("BLOCKS:", blocks)
-    log("SEEDS:", seeds)
-    log("CYCLES:", stats.cycles)
-    log("PLANTED:", stats.planted)
-    log("HARVESTED:", stats.harvested)
-    log("SEEDS DROPPED:", stats.dropped)
-    log("UPTIME:", uptime .. "m")
-    log("=================================")
+local function can_plant(x, y)
+    if x == LOCK_X and y == LOCK_Y then return false end
+    if x == PORTAL_X and y == PORTAL_Y then return false end
+    return true
 end
 
-task.spawn(function()
-    while true do
-        sleep_ms(STATUS_INTERVAL)
-        print_status()
-    end
-end)
+-------------------------------------------------
+-- FIELD LOOP
+-------------------------------------------------
 
-bot:on(events.PACKET_RECEIVED, function(pkt)
-    for _, id in ipairs(pkt.ids) do
-        if id == "AnP" then
-            if pkt.document and pkt.document["m0"] and pkt.document["m0"]["UN"] then
-                local username = pkt.document["m0"]["UN"]
-                local userId = pkt.document["m0"]["U"]
+local function plant_all()
+    log("PLANT PHASE")
 
-                if not WHITELIST[username] then
-                    pcall(function()
-                        bot:world_ban(userId)
-                    end)
-                end
+    for y = FIELD_MIN_Y, FIELD_MAX_Y do
+        for x = FIELD_MIN_X, FIELD_MAX_X do
+
+            if not can_plant(x, y) then
+                goto continue
             end
-        end
-    end
-end)
 
-local function ensure_world(world)
-    while bot:state() ~= "InWorld" do
-        if bot:state() == "Failed" then
-            bot:connect()
+            if bot:has_item(BLOCK_ID) then
+                bot:plant(x, y, BLOCK_ID)
+                sleep_ms(50)
+            end
+
+            ::continue::
         end
-        if bot:state() == "MenuIdle" then
-            bot:warp(world)
-        end
-        sleep_ms(3000)
     end
 end
 
-local function warp(world)
-    pcall(function()
-        bot:warp(world)
-    end)
-    ensure_world(world)
-    sleep_ms(4000)
+-------------------------------------------------
+-- HARVEST
+-------------------------------------------------
+
+local function harvest_all()
+    log("HARVEST PHASE")
+
+    bot:set_auto_collect(true, 200)
+
+    local w = bot:get_world()
+
+    for y = FIELD_MIN_Y, FIELD_MAX_Y do
+        for x = FIELD_MIN_X, FIELD_MAX_X do
+
+            if not can_plant(x, y) then
+                goto continue
+            end
+
+            local s = w.seed_at(x, y)
+
+            if s and s.ready then
+                bot:find_path(x, y)
+                sleep_ms(120)
+                bot:hit_block(0, 0)
+                sleep_ms(120)
+            end
+
+            ::continue::
+        end
+    end
+
+    bot:set_auto_collect(false)
 end
+
+-------------------------------------------------
+-- FAST BREAK (spawn point)
+-------------------------------------------------
 
 local function burst(x, y)
-    for i = 1, STACK_COUNT do
+
+    for i = 1, 30 do
+
         bot:send("SB", {
             x = x,
             y = y,
             BlockType = BLOCK_ID
         })
-        for j = 1, HITS_PER_BLOCK do
-            bot:send("HB", {
-                x = x,
-                y = y
-            })
+
+        for j = 1, 4 do
+            bot:send("HB", { x = x, y = y })
         end
     end
 end
 
-local function ensure_break(x, y)
-    local tile = bot:get_tile(x, y)
-    if tile and tile.fg ~= 0 then
-        for i = 1, 4 do
-            bot:send("HB", {
-                x = x,
-                y = y
-            })
-            sleep_ms(200)
-        end
+local function break_spawn()
+
+    local p = bot:pos()
+    local px, py = p.tile_x, p.tile_y
+
+    burst(px - 1, py - 1)
+    burst(px,     py - 1)
+    burst(px + 1, py - 1)
+
+end
+
+-------------------------------------------------
+-- STORAGE SYSTEM
+-------------------------------------------------
+
+local function do_storage(seeds)
+
+    if seeds < MAX_SEEDS then return end
+
+    log("STORAGE TRIGGERED")
+
+    bot:warp(STORAGE_WORLD)
+    sleep_ms(3000)
+
+    bot:warp(STORAGE_PORTAL)
+    sleep_ms(3000)
+
+    local drop = seeds - KEEP_AMOUNT
+
+    if drop > 0 then
+        bot:drop(BLOCK_ID, drop, 2)
+        log("DROPPED SEEDS:", drop)
     end
+
+    bot:warp(world_name)
+    sleep_ms(3000)
 end
 
-local function fast_collect(x, y)
-    ensure_break(x, y)
-    pcall(function()
-        bot:find_path(x, y)
-    end)
-    sleep_ms(150)
-    bot:collectAll()
-    sleep_ms(150)
-end
+-------------------------------------------------
+-- AUTO BAN SYSTEM
+-------------------------------------------------
 
-local function do_break_cycle()
-    local pos = bot:pos()
-    local px = pos.tile_x
-    local py = pos.tile_y
+local function setup_ban()
 
-    burst(px - 1, py + 1)
-    burst(px, py + 1)
-    burst(px + 1, py + 1)
+    bot:on(events.PACKET_RECEIVED, function(pkt)
 
-    sleep_ms(3500)
-    bot:leave()
-    sleep_ms(5000)
-    warp(WORLD_NAME)
+        for _, id in ipairs(pkt.ids) do
+            if id == "AnP" then
 
-    fast_collect(px - 1, py + 1)
-    fast_collect(px, py + 1)
-    fast_collect(px + 1, py + 1)
+                local d = pkt.document
+                if not d or not d.m0 then return end
 
-    pcall(function()
-        bot:find_path(px, py)
-    end)
-    sleep_ms(300)
-    stats.cycles = stats.cycles + 1
-end
+                local name = d.m0.UN
+                local uid = d.m0.U
 
-local function is_blocked_tile(x, y)
-    if x == 40 and y == 5 then return true end
-    if x == 40 and y == 6 then return true end
-    return false
-end
-
--- ==========================================
--- 🔥 OPTIMIZED PLANT SEEDS (WALK + SPEED) 🔥
--- ==========================================
-local function plant_seeds()
-    local _, seeds = count_items()
-    if seeds <= 0 then return end
-
-    local planted = 0
-    -- 🚀 Скорость шага: 90мс — баланс между скоростью и анти-киком
-    local MOVE_DELAY = 90
-    local PLANT_DELAY = 90
-
-    for y = FARM_Y_START, FARM_Y_END do
-        for x = WORLD_MIN_X, WORLD_MAX_X do
-            if planted >= 239 then return end
-            local _, current_seeds = count_items()
-            if current_seeds <= 0 then return end
-
-            if not is_blocked_tile(x, y) then
-                local tile = bot:get_tile(x, y)
-                if tile and tile.fg == 0 then
-                    
-                    -- 1. Быстрый подход через walk() только если нужно
-                    local pos = bot:pos()
-                    local cur_x, cur_y = pos.tile_x, pos.tile_y
-                    
-                    -- Manhattan distance: пока дальше 2 блоков — идём
-                    while math.abs(cur_x - x) + math.abs(cur_y - y) > 2 do
-                        local dx, dy = 0, 0
-                        -- Сначала горизонталь (так как ферма широкая), потом вертикаль
-                        if cur_x < x then dx = 1 elseif cur_x > x then dx = -1 end
-                        if cur_y < y then dy = 1 elseif cur_y > y then dy = -1 end
-                        
-                        if dx ~= 0 then
-                            bot:walk(dx, 0)
-                        elseif dy ~= 0 then
-                            bot:walk(0, dy)
-                        end
-                        
-                        sleep_ms(MOVE_DELAY)
-                        
-                        pos = bot:pos()
-                        cur_x, cur_y = pos.tile_x, pos.tile_y
-                    end
-                    
-                    -- 2. Сажаем (бот уже рядом)
-                    pcall(function()
-                        bot:plant(x, y, BLOCK_ID)
-                    end)
-
-                    planted = planted + 1
-                    stats.planted = stats.planted + 1
-                    sleep_ms(PLANT_DELAY)
+                if name == OWNER then
+                    return
                 end
+
+                bot:world_ban(uid)
+                log("BANNED:", name)
             end
         end
-    end
-end
--- ==========================================
-
-local function all_ready()
-    local w = bot:get_world()
-    for _, seed in ipairs(w.seeds) do
-        if not is_blocked_tile(seed.x, seed.y) then
-            if not seed.ready then
-                return false
-            end
-        end
-    end
-    return true
-end
-
-local function wait_growth()
-    bot:respawn()
-    while true do
-        if all_ready() then break end
-        sleep_ms(5000)
-    end
-end
-
-local function harvest_seed(x, y)
-    ensure_break(x, y)
-    for i = 1, 4 do
-        bot:send("HB", { x = x, y = y })
-        sleep_ms(120)
-    end
-    fast_collect(x, y)
-    stats.harvested = stats.harvested + 1
-end
-
-local function harvest_all()
-    for y = FARM_Y_START, FARM_Y_END do
-        for x = WORLD_MIN_X, WORLD_MAX_X do
-            if not is_blocked_tile(x, y) then
-                local seed = bot:get_world().seed_at(x, y)
-                if seed and seed.ready then
-                    pcall(function()
-                        bot:find_path(x, y)
-                    end)
-                    sleep_ms(120)
-                    harvest_seed(x, y)
-                end
-            end
-        end
-    end
-end
-
-local function storage_drop()
-    local _, seeds = count_items()
-    if seeds < SEED_DROP_THRESHOLD then return end
-
-    warp(STORAGE_WORLD)
-    pcall(function()
-        bot:warp(STORAGE_PORTAL)
     end)
-    sleep_ms(5000)
-
-    local _, now_seeds = count_items()
-    local drop_amount = math.min(SEED_DROP_AMOUNT, now_seeds - SEED_KEEP)
-
-    if drop_amount > 0 then
-        pcall(function()
-            bot:drop(BLOCK_ID, drop_amount, 2)
-        end)
-        stats.dropped = stats.dropped + drop_amount
-        sleep_ms(1000)
-    end
-    warp(WORLD_NAME)
 end
 
-warp(WORLD_NAME)
+-------------------------------------------------
+-- LOG TABLE
+-------------------------------------------------
 
-bot:on(events.PRESEND, function()
-    if running then return end
-    running = true
+local last_log = 0
+
+local function log_status(blocks, seeds)
+
+    local now = now_ms()
+
+    if now - last_log < 60000 then return end
+    last_log = now
+
+    log("====================")
+    log("WORLD:", world_name)
+    log("BLOCKS:", blocks)
+    log("SEEDS:", seeds)
+    log("STATE:", bot:state())
+    log("====================")
+end
+
+-------------------------------------------------
+-- MAIN LOOP
+-------------------------------------------------
+
+local function main()
+
+    setup_ban()
+
+    bot:connect()
+    sleep_ms(3000)
+
+    bot:warp(WORLD)
+    sleep_ms(4000)
 
     while true do
-        ensure_world(WORLD_NAME)
-        local blocks, seeds = count_items()
+
+        if bot:state() ~= "InWorld" then
+            bot:warp(WORLD)
+            sleep_ms(4000)
+        end
+
+        local blocks, seeds = count_inv()
+
+        log_status(blocks, seeds)
+
+        if seeds > MAX_SEEDS then
+            do_storage(seeds)
+        end
 
         if blocks > 0 then
-            do_break_cycle()
-        elseif seeds > 0 then
-            plant_seeds()
-            wait_growth()
-            harvest_all()
-            storage_drop()
-        else
-            sleep_ms(10000)
+            break_spawn()
+            sleep_ms(2000)
         end
-    end
-end)
 
-while true do
-    sleep_ms(1000)
+        plant_all()
+        sleep_ms(1000)
+
+        harvest_all()
+        sleep_ms(1000)
+
+    end
 end
 
+main()
