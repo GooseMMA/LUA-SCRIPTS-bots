@@ -1,711 +1,432 @@
--- =========================================================
--- SCRIPT NAME:
--- MIRAI SOLO FARMER · MIXED PLACE + BREAK · CLEAR BEFORE COLLECT
---
--- MAIN RULE:
--- BEFORE ANY RESOURCE PICKUP, the bot first makes sure that all 5 farm
--- coordinates are empty / fg == 0. Only after that it runs the pickup route.
---
--- WHAT THIS SCRIPT DOES:
--- 1) The bot automatically saves the script start coordinate as HOME.
--- 2) RESTOCK is calculated automatically as:
---      RESTOCK_X = HOME_X - 3
---      RESTOCK_Y = HOME_Y
--- 3) The bot farms 5 coordinates around HOME:
---      HOME_X - 1, HOME_Y + 1
---      HOME_X - 1, HOME_Y + 2
---      HOME_X,     HOME_Y + 2
---      HOME_X + 1, HOME_Y + 2
---      HOME_X + 1, HOME_Y + 1
--- 4) The counter is based on SUCCESSFULLY BROKEN blocks, not placed blocks.
--- 5) Every TARGET_BROKEN_COUNT broken blocks:
---      clear all 5 target coordinates first
---      collect loot/resources
---      restock blocks at HOME_X - 3, HOME_Y
---      return HOME
--- 6) If there is no place/break work for too long:
---      clear all 5 target coordinates first
---      collect loot/resources
---      restock blocks
---      return HOME
---
--- MODE:
--- Mixed mode: if target has a block -> break it; if target is empty -> place and break it.
---
--- REJOIN / WORLD LEAVE BEHAVIOR:
--- Current MIRAI API has no real auto-join function.
--- If the bot leaves the world, the script pauses.
--- When world data appears again, the bot waits AFK for 2 seconds,
--- goes to the last saved position, returns HOME, clears target blocks,
--- collects loot/resources, then continues.
---
--- SPEED NOTE:
--- Speed depends on ping, server delay, and tile update speed.
--- If the bot misses blocks, increase BREAK_DELAY or MOVE/COLLECT delays.
--- =========================================================
+local bot = getBot(SLOT_ID)
 
--- =========================
--- CONFIG
--- =========================
+if not bot then
+    return
+end
 
-local PLACE_ITEM_ID = 66
--- Change this to the item ID the bot must place.
+bot:off(events.PRESEND)
+bot:off(events.PACKET_RECEIVED)
 
-local TARGET_BROKEN_COUNT = 100
--- Every 100 successfully broken blocks, the bot clears targets, collects, and restocks.
+local WORLD_NAME = "TEST02"
+local STORAGE_WORLD = "GOOSE"
+local STORAGE_PORTAL = "qwerty4"
 
-local RESTOCK_OFFSET_X = -3
-local RESTOCK_OFFSET_Y = 0
+local BLOCK_ID = 2735
 
-local EMPTY_ID = 0
-local PLACE_LAYER = "fg"
-local BREAK_LAYER = "fg"
+local STACK_COUNT = 30
+local HITS_PER_BLOCK = 4
 
-local WAIT_WORLD_DELAY = 1000
-local REJOIN_AFK_WAIT_MS = 2000
+local FARM_Y_START = 3
+local FARM_Y_END = 5
 
-local MOVE_WAIT_MS = 40
-local RESTOCK_WAIT_MS = 1000
+local WORLD_MIN_X = 0
+local WORLD_MAX_X = 79
 
-local PLACE_DELAY_MS = 20
-local NO_WORK_WAIT_MS = 25
+local SEED_KEEP = 140
+local SEED_DROP_AMOUNT = 360
+local SEED_DROP_THRESHOLD = 500
 
-local IDLE_RESTOCK_AFTER_MS = 15000
--- If the bot cannot place or break anything for this long, it will clear targets,
--- collect loot, and restock.
+local STATUS_INTERVAL = 60000
 
-local IDLE_RESTOCK_LOG_EVERY_MS = 5000
-
-local BREAK_DELAY_MIN = 190
-local BREAK_DELAY_MAX = 210
-local MAX_HITS_PER_TARGET = 40
-local MAX_CLEAR_PASSES = 8
-
-local COLLECT_ROUTE_PASSES = 2
-local COLLECT_MOVE_WAIT_MS = 90
-local COLLECT_EXTRA_HOME_SWEEP = true
-
-math.randomseed(os.time())
-
--- =========================
--- STATE
--- =========================
-
-local HOME_X = nil
-local HOME_Y = nil
-local RESTOCK_X = nil
-local RESTOCK_Y = nil
-
-local broken_count = 0
-
-local last_work_time_ms = os.time() * 1000
-local last_idle_log_time_ms = 0
-local is_resource_cycle_running = false
-
-local was_out_of_world = false
-local needs_rejoin_recovery = false
-local last_known_x = nil
-local last_known_y = nil
-
--- =========================
--- TARGET PATTERN
--- =========================
-
-local OFFSETS = {
-    {-1, 1},
-    {-1, 2},
-    { 0, 2},
-    { 1, 2},
-    { 1, 1}
+local WHITELIST = {
+    ["Snorf"] = true
 }
 
--- =========================
--- FORWARD DECLARATIONS
--- =========================
+local running = false
 
-local collect_loot
-local restock
-local clear_all_targets
-local resource_cycle
-local finish_broken_cycle_if_needed
-local idle_restock_if_needed
+local stats = {
+    cycles = 0,
+    planted = 0,
+    harvested = 0,
+    dropped = 0,
+    start = now_ms()
+}
 
--- =========================
--- BASIC UTILS
--- =========================
+local function count_items()
 
-local function now_ms()
-    return os.time() * 1000
-end
+    local blocks = 0
+    local seeds = 0
 
-local function rand(a, b)
-    return math.random(a, b)
-end
+    for _, item in ipairs(bot:get_inventory()) do
 
-local function rsleep(a, b)
-    sleep(rand(a, b))
-end
+        if item.id == BLOCK_ID then
 
-local function mark_work(reason)
-    last_work_time_ms = now_ms()
-
-    if reason then
-        log("[WORK] " .. tostring(reason))
-    end
-end
-
-local function get_world()
-    local ok, world
-
-    if bot.get_world then
-        ok, world = pcall(function()
-            return bot.get_world()
-        end)
-
-        if ok and world then
-            return world
+            if item.inventory_type == 0 then
+                blocks = blocks + item.amount
+            elseif item.inventory_type == 2 then
+                seeds = seeds + item.amount
+            end
         end
     end
 
-    if bot.world then
-        ok, world = pcall(function()
-            return bot.world()
-        end)
-
-        if ok and world then
-            return world
-        end
-    end
-
-    return nil
+    return blocks, seeds
 end
 
-local function wait_world()
+local function print_status()
+
+    local blocks, seeds = count_items()
+
+    local uptime = math.floor((now_ms() - stats.start) / 60000)
+
+    log("========== FARM STATUS ==========")
+    log("WORLD:", tostring(bot:get_world_name()))
+    log("STATE:", bot:state())
+    log("BLOCKS:", blocks)
+    log("SEEDS:", seeds)
+    log("CYCLES:", stats.cycles)
+    log("PLANTED:", stats.planted)
+    log("HARVESTED:", stats.harvested)
+    log("SEEDS DROPPED:", stats.dropped)
+    log("UPTIME:", uptime .. "m")
+    log("=================================")
+end
+
+task.spawn(function()
+
     while true do
-        local world = get_world()
+        sleep_ms(STATUS_INTERVAL)
+        print_status()
+    end
+end)
 
-        if world and world.width and world.height then
-            if was_out_of_world then
-                log("[REJOIN] World data returned. AFK wait before recovery.")
-                sleep(REJOIN_AFK_WAIT_MS)
-                needs_rejoin_recovery = true
-                was_out_of_world = false
+bot:on(events.PACKET_RECEIVED, function(pkt)
+
+    for _, id in ipairs(pkt.ids) do
+
+        if id == "AnP" then
+
+            if pkt.document
+            and pkt.document["m0"]
+            and pkt.document["m0"]["UN"] then
+
+                local username = pkt.document["m0"]["UN"]
+                local userId = pkt.document["m0"]["U"]
+
+                if not WHITELIST[username] then
+                    pcall(function()
+                        bot:world_ban(userId)
+                    end)
+                end
             end
+        end
+    end
+end)
 
-            return world
+local function ensure_world(world)
+
+    while bot:state() ~= "InWorld" do
+
+        if bot:state() == "Failed" then
+            bot:connect()
         end
 
-        was_out_of_world = true
-        log("[PAUSE] Bot is not in world. Waiting...")
-        sleep(WAIT_WORLD_DELAY)
-    end
-end
-
-local function get_pos()
-    local ok, pos = pcall(function()
-        return bot.pos()
-    end)
-
-    if ok then
-        return pos
-    end
-
-    return nil
-end
-
-local function get_bot_tile()
-    local pos = get_pos()
-
-    if not pos then
-        return 0, 0
-    end
-
-    local x = pos.tile_x or pos.x or 0
-    local y = pos.tile_y or pos.y or 0
-
-    last_known_x = x
-    last_known_y = y
-
-    return x, y
-end
-
-local function capture_home_once()
-    if HOME_X ~= nil and HOME_Y ~= nil then
-        return
-    end
-
-    wait_world()
-
-    local x, y = get_bot_tile()
-    HOME_X = x
-    HOME_Y = y
-
-    RESTOCK_X = HOME_X + RESTOCK_OFFSET_X
-    RESTOCK_Y = HOME_Y + RESTOCK_OFFSET_Y
-
-    log("[HOME AUTO] HOME = " .. tostring(HOME_X) .. "," .. tostring(HOME_Y))
-    log("[RESTOCK AUTO] RESTOCK = " .. tostring(RESTOCK_X) .. "," .. tostring(RESTOCK_Y))
-end
-
-local function in_bounds(world, x, y)
-    if not world then return false end
-    if not world.width or not world.height then return false end
-    if x < 0 then return false end
-    if y < 0 then return false end
-    if x >= world.width then return false end
-    if y >= world.height then return false end
-    return true
-end
-
-local function path_to(x, y)
-    wait_world()
-
-    local ok, result = pcall(function()
-        return bot.find_path(x, y)
-    end)
-
-    if ok and result and result.ok then
-        if MOVE_WAIT_MS > 0 then
-            sleep(MOVE_WAIT_MS)
+        if bot:state() == "MenuIdle" then
+            bot:warp(world)
         end
 
-        get_bot_tile()
+        sleep_ms(3000)
+    end
+end
+
+local function warp(world)
+
+    pcall(function()
+        bot:warp(world)
+    end)
+
+    ensure_world(world)
+
+    sleep_ms(4000)
+end
+
+local function burst(x, y)
+
+    for i = 1, STACK_COUNT do
+
+        bot:send("SB", {
+            x = x,
+            y = y,
+            BlockType = BLOCK_ID
+        })
+
+        for j = 1, HITS_PER_BLOCK do
+
+            bot:send("HB", {
+                x = x,
+                y = y
+            })
+        end
+    end
+end
+
+local function ensure_break(x, y)
+
+    local tile = bot:get_tile(x, y)
+
+    if tile and tile.fg ~= 0 then
+
+        for i = 1, 4 do
+
+            bot:send("HB", {
+                x = x,
+                y = y
+            })
+
+            sleep_ms(200)
+        end
+    end
+end
+
+local function fast_collect(x, y)
+
+    ensure_break(x, y)
+
+    pcall(function()
+        bot:find_path(x, y)
+    end)
+
+    sleep_ms(150)
+
+    bot:collectAll()
+
+    sleep_ms(150)
+end
+
+local function do_break_cycle()
+
+    local pos = bot:pos()
+
+    local px = pos.tile_x
+    local py = pos.tile_y
+
+    burst(px - 1, py + 1)
+    burst(px, py + 1)
+    burst(px + 1, py + 1)
+
+    sleep_ms(3500)
+
+    bot:leave()
+
+    sleep_ms(5000)
+
+    warp(WORLD_NAME)
+
+    fast_collect(px - 1, py + 1)
+    fast_collect(px, py + 1)
+    fast_collect(px + 1, py + 1)
+
+    pcall(function()
+        bot:find_path(px, py)
+    end)
+
+    sleep_ms(300)
+
+    stats.cycles = stats.cycles + 1
+end
+
+local function is_blocked_tile(x, y)
+
+    if x == 40 and y == 5 then
         return true
     end
 
-    log("[PATH FAIL] " .. tostring(x) .. "," .. tostring(y))
+    if x == 40 and y == 6 then
+        return true
+    end
+
     return false
 end
 
-local function return_home()
-    capture_home_once()
-    wait_world()
+local function plant_seeds()
 
-    local bx, by = get_bot_tile()
+    local _, seeds = count_items()
 
-    if bx == HOME_X and by == HOME_Y then
-        return true
+    if seeds <= 0 then
+        return
     end
 
-    return path_to(HOME_X, HOME_Y)
-end
+    local planted = 0
 
-local function get_tile_fg(x, y)
-    wait_world()
+    for y = FARM_Y_START, FARM_Y_END do
 
-    local ok, tile = pcall(function()
-        return bot.tile(x, y)
-    end)
+        for x = WORLD_MIN_X, WORLD_MAX_X do
 
-    if ok and tile then
-        return tile.fg
+            if planted >= 239 then
+                return
+            end
+
+            local _, current_seeds = count_items()
+
+            if current_seeds <= 0 then
+                return
+            end
+
+            if not is_blocked_tile(x, y) then
+
+                local tile = bot:get_tile(x, y)
+
+                if tile and tile.fg == 0 then
+
+                    pcall(function()
+                        bot:plant(x, y, BLOCK_ID)
+                    end)
+
+                    planted = planted + 1
+                    stats.planted = stats.planted + 1
+
+                    sleep_ms(120)
+                end
+            end
+        end
     end
-
-    return nil
 end
 
-local function is_empty(x, y)
-    local fg = get_tile_fg(x, y)
-    return fg == nil or fg == EMPTY_ID
-end
+local function all_ready()
 
-local function get_inventory_amount(item_id)
-    wait_world()
+    local w = bot:get_world()
 
-    local ok, inv = pcall(function()
-        return bot.inventory()
-    end)
+    for _, seed in ipairs(w.seeds) do
 
-    if not ok or not inv then
-        return 0
-    end
+        if not is_blocked_tile(seed.x, seed.y) then
 
-    for _, item in ipairs(inv) do
-        local id = item.id or item.item_id
-        local amount = item.amount or 0
-
-        if id == item_id then
-            return amount
+            if not seed.ready then
+                return false
+            end
         end
     end
 
-    return 0
+    return true
 end
 
-local function get_pattern_positions()
-    capture_home_once()
+local function wait_growth()
 
-    local positions = {}
+    bot:respawn()
 
-    for i, off in ipairs(OFFSETS) do
-        positions[#positions + 1] = {
-            x = HOME_X + off[1],
-            y = HOME_Y + off[2],
-            index = i
-        }
-    end
+    while true do
 
-    return positions
-end
-
-local function add_broken_count(x, y)
-    broken_count = broken_count + 1
-    mark_work("broken block")
-
-    log("[BROKEN COUNT] " .. tostring(broken_count) .. "/" .. tostring(TARGET_BROKEN_COUNT)
-        .. " at " .. tostring(x) .. "," .. tostring(y))
-end
-
--- =========================
--- BREAK LOGIC
--- =========================
-
-local function break_until_empty(x, y)
-    wait_world()
-    return_home()
-
-    local first_fg = get_tile_fg(x, y)
-
-    if first_fg == nil or first_fg == EMPTY_ID then
-        return false
-    end
-
-    for hit = 1, MAX_HITS_PER_TARGET do
-        wait_world()
-        return_home()
-
-        local current = get_tile_fg(x, y)
-
-        if current == nil or current == EMPTY_ID then
-            add_broken_count(x, y)
-            return true
+        if all_ready() then
+            break
         end
 
-        local ok = pcall(function()
-            bot.break_tile(x, y, BREAK_LAYER)
+        sleep_ms(5000)
+    end
+end
+
+local function harvest_seed(x, y)
+
+    ensure_break(x, y)
+
+    for i = 1, 4 do
+
+        bot:send("HB", {
+            x = x,
+            y = y
+        })
+
+        sleep_ms(120)
+    end
+
+    fast_collect(x, y)
+
+    stats.harvested = stats.harvested + 1
+end
+
+local function harvest_all()
+
+    for y = FARM_Y_START, FARM_Y_END do
+
+        for x = WORLD_MIN_X, WORLD_MAX_X do
+
+            if not is_blocked_tile(x, y) then
+
+                local seed = bot:get_world().seed_at(x, y)
+
+                if seed and seed.ready then
+
+                    pcall(function()
+                        bot:find_path(x, y)
+                    end)
+
+                    sleep_ms(120)
+
+                    harvest_seed(x, y)
+                end
+            end
+        end
+    end
+end
+
+local function storage_drop()
+
+    local _, seeds = count_items()
+
+    if seeds < SEED_DROP_THRESHOLD then
+        return
+    end
+
+    warp(STORAGE_WORLD)
+
+    pcall(function()
+        bot:warp(STORAGE_PORTAL)
+    end)
+
+    sleep_ms(5000)
+
+    local _, now_seeds = count_items()
+
+    local drop_amount = math.min(SEED_DROP_AMOUNT, now_seeds - SEED_KEEP)
+
+    if drop_amount > 0 then
+
+        pcall(function()
+            bot:drop(BLOCK_ID, drop_amount, 2)
         end)
 
-        if not ok then
-            log("[BREAK ERROR] Waiting for world data")
-            wait_world()
-            return_home()
-        end
+        stats.dropped = stats.dropped + drop_amount
 
-        rsleep(BREAK_DELAY_MIN, BREAK_DELAY_MAX)
+        sleep_ms(1000)
     end
 
-    local after = get_tile_fg(x, y)
-
-    if after == nil or after == EMPTY_ID then
-        add_broken_count(x, y)
-        return true
-    end
-
-    log("[STILL THERE] " .. tostring(x) .. "," .. tostring(y) .. " fg=" .. tostring(after))
-    return false
+    warp(WORLD_NAME)
 end
 
-clear_all_targets = function()
-    local positions = get_pattern_positions()
+warp(WORLD_NAME)
 
-    log("[CLEAR BEFORE COLLECT] Making sure all 5 target coordinates are empty")
+bot:on(events.PRESEND, function()
 
-    for pass = 1, MAX_CLEAR_PASSES do
-        local all_clear = true
-
-        for _, p in ipairs(positions) do
-            if not is_empty(p.x, p.y) then
-                all_clear = false
-                break_until_empty(p.x, p.y)
-            end
-        end
-
-        if all_clear then
-            log("[ALL CLEAR] All 5 target coordinates are empty")
-            return true
-        end
-    end
-
-    log("[CLEAR WARN] Some target coordinates may still have blocks")
-    return false
-end
-
--- =========================
--- RESTOCK / PICKUP
--- =========================
-
-collect_loot = function()
-    capture_home_once()
-    wait_world()
-
-    log("[COLLECT] Starting pickup route")
-    log("[COLLECT] This runs only after clear_all_targets()")
-
-    local world = wait_world()
-    local positions = get_pattern_positions()
-
-    for pass = 1, COLLECT_ROUTE_PASSES do
-        log("[COLLECT] Pass " .. tostring(pass) .. "/" .. tostring(COLLECT_ROUTE_PASSES))
-
-        return_home()
-        sleep(COLLECT_MOVE_WAIT_MS)
-
-        for i = 1, #positions do
-            local p = positions[i]
-
-            if in_bounds(world, p.x, p.y) then
-                path_to(p.x, p.y)
-                sleep(COLLECT_MOVE_WAIT_MS)
-            end
-        end
-
-        return_home()
-        sleep(COLLECT_MOVE_WAIT_MS)
-
-        for i = #positions, 1, -1 do
-            local p = positions[i]
-
-            if in_bounds(world, p.x, p.y) then
-                path_to(p.x, p.y)
-                sleep(COLLECT_MOVE_WAIT_MS)
-            end
-        end
-
-        if COLLECT_EXTRA_HOME_SWEEP then
-            local sweep = {
-                {HOME_X, HOME_Y},
-                {HOME_X - 1, HOME_Y},
-                {HOME_X + 1, HOME_Y},
-                {HOME_X, HOME_Y + 1},
-                {HOME_X, HOME_Y + 2},
-                {HOME_X - 1, HOME_Y + 1},
-                {HOME_X + 1, HOME_Y + 1},
-                {HOME_X - 1, HOME_Y + 2},
-                {HOME_X + 1, HOME_Y + 2}
-            }
-
-            for _, s in ipairs(sweep) do
-                if in_bounds(world, s[1], s[2]) then
-                    path_to(s[1], s[2])
-                    sleep(COLLECT_MOVE_WAIT_MS)
-                end
-            end
-        end
-
-        return_home()
-        sleep(COLLECT_MOVE_WAIT_MS)
-    end
-
-    log("[COLLECT] Pickup route finished")
-end
-
-restock = function()
-    capture_home_once()
-    wait_world()
-
-    log("[RESTOCK] Going to RESTOCK point")
-    path_to(RESTOCK_X, RESTOCK_Y)
-    sleep(RESTOCK_WAIT_MS)
-
-    local amount = get_inventory_amount(PLACE_ITEM_ID)
-    log("[RESTOCK] Current block amount: " .. tostring(amount))
-
-    log("[RESTOCK] Returning HOME")
-    return_home()
-end
-
-resource_cycle = function(reason)
-    if is_resource_cycle_running then
+    if running then
         return
     end
 
-    is_resource_cycle_running = true
+    running = true
 
-    log("[RESOURCE CYCLE] " .. tostring(reason))
-    log("[RESOURCE CYCLE] Step 1: clear all target coordinates")
-    clear_all_targets()
+    while true do
 
-    log("[RESOURCE CYCLE] Step 2: collect resources")
-    collect_loot()
+        ensure_world(WORLD_NAME)
 
-    log("[RESOURCE CYCLE] Step 3: restock blocks")
-    restock()
+        local blocks, seeds = count_items()
 
-    broken_count = 0
-    last_work_time_ms = now_ms()
-    last_idle_log_time_ms = last_work_time_ms
+        if blocks > 0 then
 
-    log("[RESOURCE CYCLE] Done. Broken counter reset.")
+            do_break_cycle()
 
-    is_resource_cycle_running = false
-end
+        elseif seeds > 0 then
 
-finish_broken_cycle_if_needed = function()
-    if broken_count >= TARGET_BROKEN_COUNT then
-        resource_cycle("target broken count reached")
-    end
-end
+            plant_seeds()
 
-idle_restock_if_needed = function(reason)
-    if is_resource_cycle_running then
-        return false
-    end
+            wait_growth()
 
-    local now = now_ms()
-    local idle_for = now - last_work_time_ms
+            harvest_all()
 
-    if idle_for < IDLE_RESTOCK_AFTER_MS then
-        if now - last_idle_log_time_ms >= IDLE_RESTOCK_LOG_EVERY_MS then
-            last_idle_log_time_ms = now
-            log("[IDLE] No place/break work for " .. tostring(math.floor(idle_for / 1000)) .. "s")
+            storage_drop()
+
+        else
+
+            sleep_ms(10000)
         end
-
-        return false
     end
-
-    resource_cycle("idle restock: " .. tostring(reason))
-    return true
-end
-
--- =========================
--- PLACE LOGIC
--- =========================
-
-local function place_one(x, y)
-    local world = wait_world()
-
-    if not in_bounds(world, x, y) then
-        log("[OUT OF BOUNDS] " .. tostring(x) .. "," .. tostring(y))
-        return false
-    end
-
-    if not is_empty(x, y) then
-        return false
-    end
-
-    if get_inventory_amount(PLACE_ITEM_ID) <= 0 then
-        resource_cycle("no blocks in inventory")
-        return false
-    end
-
-    return_home()
-
-    if not is_empty(x, y) then
-        return false
-    end
-
-    local ok = pcall(function()
-        bot.place(x, y, PLACE_ITEM_ID, PLACE_LAYER)
-    end)
-
-    if ok then
-        mark_work("placed block")
-        log("[PLACED] at " .. tostring(x) .. "," .. tostring(y))
-
-        if PLACE_DELAY_MS > 0 then
-            sleep(PLACE_DELAY_MS)
-        end
-
-        return true
-    end
-
-    log("[PLACE ERROR] " .. tostring(x) .. "," .. tostring(y))
-    return false
-end
-
-
-
-
-local function farm_once()
-    local positions = get_pattern_positions()
-    local did_work = false
-
-    for _, p in ipairs(positions) do
-        finish_broken_cycle_if_needed()
-
-        if not is_empty(p.x, p.y) then
-            if break_until_empty(p.x, p.y) then
-                did_work = true
-            end
-        end
-
-        finish_broken_cycle_if_needed()
-
-        if is_empty(p.x, p.y) then
-            if place_one(p.x, p.y) then
-                did_work = true
-
-                if break_until_empty(p.x, p.y) then
-                    did_work = true
-                end
-            end
-        end
-
-        finish_broken_cycle_if_needed()
-    end
-
-    if not did_work then
-        idle_restock_if_needed("mixed no work")
-        sleep(NO_WORK_WAIT_MS)
-    end
-end
-
-
--- =========================
--- REJOIN RECOVERY
--- =========================
-
-local function handle_rejoin_recovery()
-    if not needs_rejoin_recovery then
-        return
-    end
-
-    needs_rejoin_recovery = false
-
-    log("[REJOIN RECOVERY] Going to last saved position first")
-
-    if last_known_x ~= nil and last_known_y ~= nil then
-        path_to(last_known_x, last_known_y)
-    end
-
-    log("[REJOIN RECOVERY] Returning HOME")
-    return_home()
-
-    log("[REJOIN RECOVERY] Clear targets first, then collect loot")
-    clear_all_targets()
-    collect_loot()
-
-    return_home()
-    mark_work("rejoin recovery finished")
-end
-
--- =========================
--- MAIN
--- =========================
-
-wait_world()
-capture_home_once()
-
-log("[START] MIRAI SOLO FARMER · MIXED PLACE + BREAK · CLEAR BEFORE COLLECT")
-log("[INFO] HOME is auto-detected from script start position")
-log("[INFO] RESTOCK is 3 tiles left from HOME")
-log("[INFO] Before every pickup, all 5 target coordinates are cleared first")
-
--- First startup rule:
--- 1) Make sure all target coordinates are empty.
--- 2) Then collect resources.
--- 3) Then restock.
-clear_all_targets()
-collect_loot()
-restock()
+end)
 
 while true do
-    wait_world()
-    handle_rejoin_recovery()
-    return_home()
-
-    farm_once()
-
-    finish_broken_cycle_if_needed()
-    idle_restock_if_needed("main loop")
+    sleep_ms(1000)
 end
