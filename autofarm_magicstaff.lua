@@ -31,39 +31,21 @@ local FIELD_MAX_X = 79
 local FIELD_MIN_Y = 3
 local FIELD_MAX_Y = 5
 
+local WALK_Y = 4
+
 local LOCK_X = 40
 local LOCK_Y = 5
 
 local PORTAL_X = 40
 local PORTAL_Y = 6
 
-local BREAK_DELAY = 200
-local WALK_DELAY = 80
-local PLANT_DELAY = 70
-local HARVEST_DELAY = 120
+local WALK_DELAY = 45
+local PLANT_DELAY = 60
+local BREAK_DELAY = 85
 
 local REJOIN_DELAY = 3500
 
 local last_log = 0
-
--------------------------------------------------
--- SAVE
--------------------------------------------------
-
-local SAVE_KEY = "farm_progress_" .. bot:name()
-
-local progress = globalStorage.get(SAVE_KEY) or {
-    x = FIELD_MIN_X,
-    y = FIELD_MIN_Y
-}
-
-local function save_progress(x, y)
-
-    progress.x = x
-    progress.y = y
-
-    globalStorage.set(SAVE_KEY, progress)
-end
 
 -------------------------------------------------
 -- INVENTORY
@@ -80,9 +62,7 @@ local function count_inventory()
 
             if item.inventory_type == 0 then
                 blocks = blocks + item.amount
-            end
-
-            if item.inventory_type == 2 then
+            elseif item.inventory_type == 2 then
                 seeds = seeds + item.amount
             end
         end
@@ -92,7 +72,7 @@ local function count_inventory()
 end
 
 -------------------------------------------------
--- SAFE
+-- SAFE TILE
 -------------------------------------------------
 
 local function blocked_tile(x, y)
@@ -129,23 +109,20 @@ local function status()
     log("STATE:", bot:state())
     log("BLOCKS:", blocks)
     log("SEEDS:", seeds)
-    log("PROGRESS:", progress.x, progress.y)
     log("============================")
 end
 
 -------------------------------------------------
--- REJOIN
+-- WORLD CHECK
 -------------------------------------------------
 
 local function ensure_world()
 
     while bot:state() ~= "InWorld" do
 
-        log("NOT IN WORLD:", bot:state())
+        log("REJOIN:", bot:state())
 
         sleep_ms(REJOIN_DELAY)
-
-        log("WARPING:", WORLD)
 
         bot:warp(WORLD)
 
@@ -161,37 +138,13 @@ local function refresh_inventory()
 
     bot:leave()
 
-    sleep_ms(1500)
+    sleep_ms(1200)
 
     bot:warp(WORLD)
 
     sleep_ms(4000)
 
     ensure_world()
-
-    log("REJOIN SUCCESS")
-end
-
--------------------------------------------------
--- UNSTUCK
--------------------------------------------------
-
-local function unstuck_check()
-
-    local old = bot:pos()
-
-    sleep_ms(2000)
-
-    local new = bot:pos()
-
-    if old.tile_x == new.tile_x and old.tile_y == new.tile_y then
-
-        log("BOT STUCK -> RESPAWN")
-
-        bot:respawn()
-
-        sleep_ms(1500)
-    end
 end
 
 -------------------------------------------------
@@ -246,7 +199,7 @@ local function storage_check()
         return
     end
 
-    log("STORAGE MODE")
+    log("STORAGE")
 
     bot:warp(STORAGE_WORLD)
 
@@ -273,129 +226,11 @@ end
 
 local function smart_collect()
 
-    local before = #bot:get_collectables()
-
     bot:collectAll()
 
-    sleep_ms(150)
+    sleep_ms(120)
 
-    local after = #bot:get_collectables()
-
-    if after >= before then
-
-        bot:collectAll()
-
-        sleep_ms(250)
-    end
-end
-
--------------------------------------------------
--- BREAK TREE
--------------------------------------------------
-
-local function break_tree(x, y)
-
-    for i = 1, 3 do
-
-        bot:send("HB", {
-            x = x,
-            y = y
-        })
-
-        sleep_ms(HARVEST_DELAY)
-
-        local tile = bot:get_tile(x, y)
-
-        if tile and tile.fg == 0 then
-            return true
-        end
-    end
-
-    return false
-end
-
--------------------------------------------------
--- COLLECT TILE
--------------------------------------------------
-
-local function collect_tile(x, y)
-
-    local tile = bot:get_tile(x, y)
-
-    if tile and tile.fg ~= 0 then
-
-        bot:send("HB", {
-            x = x,
-            y = y
-        })
-
-        sleep_ms(200)
-    end
-
-    local points = {
-        {x, y + 1},
-        {x - 1, y + 1},
-        {x + 1, y + 1}
-    }
-
-    for _, p in ipairs(points) do
-
-        if bot:isWalkable(p[1], p[2]) then
-
-            pcall(function()
-                bot:find_path(p[1], p[2])
-            end)
-
-            sleep_ms(WALK_DELAY)
-
-            smart_collect()
-
-            sleep_ms(100)
-        end
-    end
-end
-
--------------------------------------------------
--- WORLD CLEANUP
--------------------------------------------------
-
-local function cleanup_world()
-
-    log("WORLD CLEANUP")
-
-    for y = FIELD_MIN_Y, FIELD_MAX_Y do
-
-        for x = FIELD_MIN_X, FIELD_MAX_X do
-
-            if blocked_tile(x, y) then
-                goto continue
-            end
-
-            local tile = bot:get_tile(x, y)
-
-            if tile and tile.fg ~= 0 then
-
-                local walk_y = y + 1
-
-                if bot:isWalkable(x, walk_y) then
-
-                    pcall(function()
-                        bot:find_path(x, walk_y)
-                    end)
-
-                    sleep_ms(WALK_DELAY)
-                end
-
-                break_tree(x, y)
-
-                collect_tile(x, y)
-            end
-
-            ::continue::
-        end
-    end
-
-    refresh_inventory()
+    bot:collectAll()
 end
 
 -------------------------------------------------
@@ -410,33 +245,29 @@ local function plant_all()
         return
     end
 
+    log("PLANT START")
+
     for x = FIELD_MIN_X, FIELD_MAX_X do
 
-        local stand_x = x
-        local stand_y = FIELD_MAX_Y + 1
+        if seeds <= 0 then
+            break
+        end
 
-        if bot:isWalkable(stand_x, stand_y) then
+        local walk_y = WALK_Y
+
+        if bot:isWalkable(x, walk_y) then
 
             pcall(function()
-                bot:find_path(stand_x, stand_y)
+                bot:find_path(x, walk_y)
             end)
 
             sleep_ms(WALK_DELAY)
-
-            unstuck_check()
         end
 
         for y = FIELD_MIN_Y, FIELD_MAX_Y do
 
-            save_progress(x, y)
-
             if seeds <= 0 then
-
-                log("SEEDS EMPTY")
-
-                refresh_inventory()
-
-                return
+                break
             end
 
             if blocked_tile(x, y) then
@@ -459,6 +290,8 @@ local function plant_all()
     end
 
     refresh_inventory()
+
+    log("PLANT DONE")
 end
 
 -------------------------------------------------
@@ -487,60 +320,98 @@ local function all_ready()
 end
 
 -------------------------------------------------
--- HARVEST
+-- FAST HARVEST
 -------------------------------------------------
+
+local function harvest_column(x)
+
+    bot:send("HB", {
+        x = x,
+        y = 3
+    })
+
+    bot:send("HB", {
+        x = x,
+        y = 4
+    })
+
+    bot:send("HB", {
+        x = x,
+        y = 5
+    })
+end
+
+local function collect_world()
+
+    log("COLLECT START")
+
+    local collectables = bot:get_collectables()
+
+    for _, obj in ipairs(collectables) do
+
+        local cx = math.floor(obj.x / 32)
+        local cy = math.floor(obj.y / 32)
+
+        local walk_y = cy + 1
+
+        if bot:isWalkable(cx, walk_y) then
+
+            pcall(function()
+                bot:find_path(cx, walk_y)
+            end)
+
+            sleep_ms(WALK_DELAY)
+
+            smart_collect()
+
+            sleep_ms(80)
+        end
+    end
+
+    smart_collect()
+
+    log("COLLECT DONE")
+end
 
 local function harvest_all()
 
-    log("WAITING READY")
+    log("WAIT READY")
 
     while not all_ready() do
         sleep_ms(5000)
     end
 
-    log("HARVEST START")
+    log("FAST HARVEST")
 
-    bot:set_auto_collect(true, 200)
+    for x = FIELD_MIN_X, FIELD_MAX_X do
 
-    for y = FIELD_MIN_Y, FIELD_MAX_Y do
+        local walk_y = WALK_Y
 
-        for x = FIELD_MIN_X, FIELD_MAX_X do
+        if bot:isWalkable(x, walk_y) then
 
-            save_progress(x, y)
+            pcall(function()
+                bot:find_path(x, walk_y)
+            end)
 
-            if blocked_tile(x, y) then
-                goto continue
-            end
-
-            local s = bot:get_world().seed_at(x, y)
-
-            if s and s.ready then
-
-                local walk_y = y + 1
-
-                if bot:isWalkable(x, walk_y) then
-
-                    pcall(function()
-                        bot:find_path(x, walk_y)
-                    end)
-
-                    sleep_ms(WALK_DELAY)
-
-                    unstuck_check()
-                end
-
-                break_tree(x, y)
-
-                collect_tile(x, y)
-            end
-
-            ::continue::
+            sleep_ms(WALK_DELAY)
         end
+
+        harvest_column(x)
+
+        sleep_ms(BREAK_DELAY)
     end
 
-    bot:set_auto_collect(false)
+    sleep_ms(1500)
+
+    collect_world()
+
+    bot:respawn()
+
+    sleep_ms(1000)
 
     refresh_inventory()
+
+    log("HARVEST DONE")
 end
 
 -------------------------------------------------
@@ -567,52 +438,20 @@ local function burst(x, y)
     end
 end
 
--------------------------------------------------
--- SPAWN COLLECT
--------------------------------------------------
-
 local function collect_spawn()
 
     local p = bot:pos()
-
-    local targets = {
-        {p.tile_x - 1, p.tile_y + 1},
-        {p.tile_x,     p.tile_y + 1},
-        {p.tile_x + 1, p.tile_y + 1}
-    }
-
-    log("CHECKING LEFTOVER")
-
-    for _, t in ipairs(targets) do
-
-        local x = t[1]
-        local y = t[2]
-
-        local tile = bot:get_tile(x, y)
-
-        if tile and tile.fg ~= 0 then
-
-            bot:send("HB", {
-                x = x,
-                y = y
-            })
-
-            sleep_ms(200)
-        end
-    end
 
     local sx = p.tile_x
     local sy = p.tile_y
 
     local path = {
 
-        {sx, sy - 1},
+        {sx, sy + 1},
 
-        {sx + 1, sy - 1},
+        {sx + 1, sy + 1},
 
-        {sx - 1, sy - 1},
-
-        {sx - 1, sy - 1},
+        {sx - 1, sy + 1},
 
         {sx, sy}
     }
@@ -629,14 +468,10 @@ local function collect_spawn()
 
             smart_collect()
 
-            sleep_ms(120)
+            sleep_ms(80)
         end
     end
 end
-
--------------------------------------------------
--- INSTA BREAK CYCLE
--------------------------------------------------
 
 local function break_cycle()
 
@@ -646,23 +481,21 @@ local function break_cycle()
         return
     end
 
-    log("INSTA BREAK START")
+    log("INSTA BREAK")
 
     local p = bot:pos()
 
     burst(p.tile_x - 1, p.tile_y + 1)
 
-    sleep_ms(BREAK_DELAY + math.random(0, 40))
+    sleep_ms(200)
 
     burst(p.tile_x, p.tile_y + 1)
 
-    sleep_ms(BREAK_DELAY + math.random(0, 40))
+    sleep_ms(200)
 
     burst(p.tile_x + 1, p.tile_y + 1)
 
-    sleep_ms(BREAK_DELAY + math.random(0, 40))
-
-    log("BREAK DONE -> REJOIN")
+    sleep_ms(200)
 
     refresh_inventory()
 
@@ -670,7 +503,7 @@ local function break_cycle()
 
     refresh_inventory()
 
-    log("INSTA BREAK FINISHED")
+    log("BREAK DONE")
 end
 
 -------------------------------------------------
@@ -686,8 +519,6 @@ bot:warp(WORLD)
 sleep_ms(4000)
 
 ensure_world()
-
-cleanup_world()
 
 while true do
 
