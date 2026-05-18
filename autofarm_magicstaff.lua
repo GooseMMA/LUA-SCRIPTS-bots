@@ -10,17 +10,17 @@ local PORTAL_DROP   = "TEST02:qwerty3"  -- Портал для сброса из
 
 -- 💎 ПАРАМЕТРЫ ПРЕДМЕТА И ПЛАНТАЦИИ
 local TARGET_ID      = 2735             -- ID Gem Soil
-local HITS_PER_BLOCK = 4                -- Удары
+local HITS_PER_BLOCK = 4                -- Сколько ударов нужно для разрушения блока
 
 local FARM_Y         = 3                -- Линия грядки
-local FARM_X1, FARM_X2 = 0, 79          -- Границы фермы
+local FARM_X1, FARM_X2 = 0, 79          -- Границы фермы по горизонтали
 
--- 📦 ЛИМИТЫ СЕМЯН
-local SEED_LIMIT    = 600               -- Порог сброса
-local SEED_KEEP     = 400               -- Сколько оставить себе
+-- 📦 ЛИМИТЫ СЕМЯН В ИНВЕНТАРЕ
+local SEED_LIMIT    = 600               -- Порог, выше которого идем скидывать семена
+local SEED_KEEP     = 400               -- Сколько семян бот оставляет себе для работы
 
 -------------------------------------------------
--- 💾 СИСТЕМА ИНВЕНТАРЯ
+-- 💾 STORAGE & СЧЕТЧИК ИНВЕНТАРЯ
 -------------------------------------------------
 local _local_state = { phase = "plant" }
 local safe_storage = {
@@ -37,6 +37,7 @@ local safe_storage = {
     end
 }
 
+-- Фильтруем инвентарь по TARGET_ID. type_id: 0 = блоки, 2 = семена
 local function count_items(type_id)
     local items = bot:get_inventory()
     if not items then return 0 end
@@ -50,7 +51,7 @@ local function count_items(type_id)
 end
 
 -------------------------------------------------
--- 🌀 НАВИГАЦИЯ
+-- 🌀 НАДЕЖНЫЙ УМНЫЙ ПЕРЕХОДЧИК
 -------------------------------------------------
 local function smart_warp(portal_id)
     local target_world_clean = portal_id:match("^([^:]+)")
@@ -59,7 +60,7 @@ local function smart_warp(portal_id)
         if state == "InWorld" then
             local current_world = bot:get_world_name()
             if current_world and current_world:upper() == target_world_clean:upper() then
-                sleep_ms(800) -- Даем чуть больше времени на прогрузку координат
+                sleep_ms(800) -- Даем время на стабильную прогрузку координат
                 return true 
             else
                 log(string.format("🌍 Переход из чужого мира в %s", portal_id))
@@ -103,7 +104,7 @@ end
 -- 🛠️ ФАЗЫ ЦИКЛА
 -------------------------------------------------
 
--- 1. ПОСАДКА
+-- 1. ПОСАДКА С УМНОЙ ОЦЕНКОЙ ЗАПАСОВ
 local function phase_plant()
     log("🌱 Начинаем фазу посадки...")
     
@@ -151,7 +152,7 @@ local function phase_plant()
     safe_storage.set("phase", "wait")
 end
 
--- 2. ОЖИДАНИЕ
+-- 2. МОНИТОР РОСТА ДЕРЕВЬЕВ
 local function phase_wait()
     log("⏳ Ожидание созревания деревьев...")
     smart_warp(PORTAL_FARM)
@@ -210,7 +211,7 @@ local function phase_harvest()
     safe_storage.set("phase", "collect")
 end
 
--- 4. СБОР ЛУТА
+-- 4. СБОР ВЫПАВШЕГО ЛУТА НА ФЕРМЕ
 local function phase_collect()
     log("🧲 Сбор лута...")
     smart_warp(PORTAL_FARM)
@@ -227,7 +228,7 @@ local function phase_collect()
     safe_storage.set("phase", "break")
 end
 
--- 5. ИНСТА-БРЕЙК БЛОКОВ
+-- 5. ИНСТА-БРЕЙК БЛОКОВ С АВТОПОДБОРОМ И ЗАЩИТОЙ ПОЛА
 local function phase_break()
     log("⚡ Фаза инста-брейка блоков ID: " .. TARGET_ID)
     
@@ -246,14 +247,11 @@ local function phase_break()
         if pos then
             local px, py = pos.tile_x, pos.tile_y
             
-            -- 🔥 ЦЕЛЕВАЯ ЗОНА: 3 блока В РЯД НАД ГОЛОВОЙ (чтобы не задеть портал и пол)
-            -- py это ноги, py-1 это голова, py-2 это блок над головой
+            -- Бьем строго в 3 блока над головой (py - 2), пол и портал не заденет!
             local targets = { {px - 1, py - 2}, {px, py - 2}, {px + 1, py - 2} }
             
             for _, t in ipairs(targets) do
-                -- Юзер просил 30 блоков в каждую точку (итого 90 за цикл)
                 for i = 1, 30 do
-                    -- Оптимизация: если блоки кончились посреди цикла - прерываем спам
                     if blocks_count <= 0 then break end
                     
                     bot:send("SB", {x = t[1], y = t[2], BlockType = TARGET_ID}) 
@@ -266,19 +264,38 @@ local function phase_break()
                 end
             end
             
+            -- 🧲 Динамический сбор дропа на месте
+            log("🚶 Пробежка по координатам брейка для подбора семян...")
+            pcall(function() bot:collectAll() end)
+            
+            -- Делаем шаг влево под левый блок
+            pcall(function() bot:walk(-1, 0) end)
+            sleep_ms(150)
+            pcall(function() bot:collectAll() end)
+            
+            -- Делаем шаг вправо под правый блок
+            pcall(function() bot:walk(2, 0) end)
+            sleep_ms(150)
+            pcall(function() bot:collectAll() end)
+            
+            -- Возвращаемся ровно в центр к порталу
+            pcall(function() bot:walk(-1, 0) end)
+            sleep_ms(100)
+            
+            -- Перезаход для очистки памяти и добора редких остатков
             sleep_ms(150) 
             pcall(function() bot:leave() end) 
             sleep_ms(400) 
             
             smart_warp(PORTAL_BREAK)
-            sleep_ms(800) 
-            fast_collect_moves()
+            sleep_ms(500) 
+            fast_collect_moves() -- Заключительный круговой сбор вокруг спавна
         end
     end
     safe_storage.set("phase", "drop")
 end
 
--- 6. СБРОС ИЗЛИШКОВ
+-- 6. СБРОС ИЗЛИШКОВ СЕМЯН
 local function phase_drop()
     local current_seeds = count_items(2)
     log("📦 Всего семян в сумке: " .. current_seeds)
@@ -298,10 +315,10 @@ local function phase_drop()
 end
 
 -------------------------------------------------
--- 🔄 ГЛАВНЫЙ ЦИКЛ БОТА
+-- 🔄 ГЛАВНЫЙ УПРАВЛЯЮЩИЙ ЦИКЛ БОТА
 -------------------------------------------------
 runThread(function()
-    log("🚀 Фарм-машина v5.9 УСПЕШНО ЗАПУЩЕНА! (Бережем порталы!)")
+    log("🚀 Фарм-машина v6.0 УСПЕШНО ЗАПУЩЕНА! (Порталы спасены, автоподбор включен)")
     while true do
         local current_phase = safe_storage.get("phase") or "plant"
         
