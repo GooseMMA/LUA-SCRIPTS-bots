@@ -189,7 +189,7 @@ local function phase_wait()
     safe_storage.set("phase", "harvest")
 end
 
--- 3. СБОР УРОЖАЯ (МЕДЛЕННОЕ РАЗРУШЕНИЕ КУСТОВ: 150 МС)
+-- 3. СБОР УРОЖАЯ
 local function phase_harvest()
     log("🪓 Сбор урожая...")
     smart_warp(PORTAL_FARM)
@@ -207,7 +207,7 @@ local function phase_harvest()
                 if bot:state() ~= "InWorld" then break end
                 
                 pcall(function() bot:hit(x, FARM_Y) end)
-                sleep_ms(150) -- 🔥 ЗАДЕРЖКА 150 МС ДЛЯ ЗАЩИТЫ ОТ КИКОВ С СЕРВЕРА
+                sleep_ms(150) 
                 w = bot:get_world() 
             end
             if bot:state() == "InWorld" then
@@ -235,7 +235,7 @@ local function phase_collect()
     safe_storage.set("phase", "break")
 end
 
--- 5. ИНСТА-БРЕЙК БЛОКОВ
+-- 5. ИНСТА-БРЕЙК С ПРАВИЛЬНОЙ ОСЬЮ Y И ТРАЕКТОРИЕЙ СБОРА
 local function phase_break()
     log("⚡ Фаза инста-брейка блоков ID: " .. TARGET_ID)
     
@@ -254,8 +254,9 @@ local function phase_break()
         if pos then
             local px, py = pos.tile_x, pos.tile_y
             
-            -- Бьем строго над собой в потолок (py + 2)
-            local targets = { {px - 1, py + 2}, {px, py + 2}, {px + 1, py + 2} }
+            -- 🔥 ЖЕСТКИЙ ФИКС: бьем строго НАД ГОЛОВОЙ в ряд с использованием y + 1.
+            -- Бот стоит ровно на точке спавна, никуда не смещаясь перед установкой блоков.
+            local targets = { {px - 1, py + 1}, {px, py + 1}, {px + 1, py + 1} }
             
             for _, t in ipairs(targets) do
                 for i = 1, 30 do
@@ -271,22 +272,41 @@ local function phase_break()
                 end
             end
             
-            -- 🧲 Динамический сбор дропа шагами влево-вправо
-            log("🚶 Подбираем выпавшие семена...")
+            -- 🧲 КОРРЕКТНЫЙ СБОР ПО СХЕМЕ ЮЗЕРА (С УЧЕТОМ СТАНДАРТНОЙ ОСИ Y):
+            log("🚶 Запуск траектории подбора семян...")
             pcall(function() bot:collectAll() end)
             
+            -- 1. Шаг ВВЕРХ (в твоем клиенте это walk(0, 1) вверх)
+            pcall(function() bot:walk(0, 1) end)
+            sleep_ms(150)
+            pcall(function() bot:collectAll() end)
+            
+            -- 2. Шаг ВЛЕВО
             pcall(function() bot:walk(-1, 0) end)
             sleep_ms(150)
             pcall(function() bot:collectAll() end)
             
-            pcall(function() bot:walk(2, 0) end) 
+            -- 3. Шаг ВПРАВО (вернулись в центр верхней линии)
+            pcall(function() bot:walk(1, 0) end)
+            sleep_ms(120)
+            pcall(function() bot:collectAll() end)
+            
+            -- 4. Еще один шаг ВПРАВО (ушли в правую ячейку)
+            pcall(function() bot:walk(1, 0) end)
             sleep_ms(150)
             pcall(function() bot:collectAll() end)
             
-            pcall(function() bot:walk(-1, 0) end) 
-            sleep_ms(100)
+            -- 5. Шаг ВЛЕВО (вернулись в центр верхней линии)
+            pcall(function() bot:walk(-1, 0) end)
+            sleep_ms(120)
+            pcall(function() bot:collectAll() end)
             
-            -- Безопасный выход
+            -- 6. Шаг ВНИЗ (возврат обратно к порталу на исходную плитку)
+            pcall(function() bot:walk(0, -1) end)
+            sleep_ms(150)
+            pcall(function() bot:collectAll() end)
+            
+            -- Перезаход
             sleep_ms(150) 
             pcall(function() bot:leave() end) 
             sleep_ms(400) 
@@ -322,7 +342,7 @@ end
 -- 🔄 ГЛАВНЫЙ УПРАВЛЯЮЩИЙ ЦИКЛ БОТА
 -------------------------------------------------
 runThread(function()
-    log("🚀 Фарм-машина v6.2 успешно запущена! Удар куста замедлен до 150 мс.")
+    log("🚀 Фарм-машина v6.4 успешно запущена! Прицел Y+1 настроен.")
     while true do
         local current_phase = safe_storage.get("phase") or "plant"
         
