@@ -1,14 +1,14 @@
 -- ============================================================
--- ULTIMATE FARM v33: DISCORD LIVE TABLE + FAST DROP + QUEUE
--- Все боты работают независимо. Строгая очередь на склад (макс 3).
--- Каждую минуту таблица в Discord ОБНОВЛЯЕТСЯ (без спама новыми сообщениями).
+-- ULTIMATE FARM v34.1: FIXED SYNTAX + ANTI-ANTI-CHEAT + LIVE TABLE
+-- Полная независимость ботов. Очередь на склад (макс 3).
+-- Исправлена синтаксическая ошибка в getInvCount (строка 81).
 -- ============================================================
 math.randomseed(now_ms())
 
 local CONFIG = {
     -- 🌐 НАСТРОЙКА ДИСКОРДА
     DISCORD_WEBHOOK   = "https://discord.com/api/webhooks/ТВОЙ_ВЕБХУК_ТУТ",
-    TABLE_UPDATE_MS   = 60000, -- Обновление таблицы раз в минуту (60000 мс)
+    TABLE_UPDATE_MS   = 60000, 
 
     WATER_ID          = 1344,
     STORAGE_WORLD     = "GOOSE",
@@ -31,12 +31,12 @@ local CONFIG = {
     COLLECT_WAIT_MS   = 300,
     WORLD_LOOP_LIMIT  = 0,
     STATUS_LOG_MS     = 30000,
-    RECONNECT_CD_MS   = 4000,
+    RECONNECT_CD_MS   = 5000, 
     MAX_PASSES        = 4,
-    SYNC_WAIT_MS      = 500,
+    SYNC_WAIT_MS      = 600,  
     LIMBO_TIMEOUT_MS  = 45000,
     CONNECT_TIMEOUT_MS= 15000,
-    TICK_DELAY_MS     = 15
+    TICK_DELAY_MS     = 35    
 }
 
 -- Глобальные счётчики
@@ -51,10 +51,9 @@ local status_timer    = 0
 local globalDropRouteSerial = 0
 local global_storage_count = 0
 
--- Переменные Discord мониторинга
-local discord_msg_id = nil       -- ID сообщения в Discord для редактирования
-local last_discord_update = 0     -- Время последнего обновления таблицы
-local is_discord_sending = false  -- Флаг, чтобы запросы не накладывались друг на друга
+local discord_msg_id = nil       
+local last_discord_update = 0     
+local is_discord_sending = false  
 
 local function safeCall(fn, ...)
     local ok, res = pcall(fn, ...)
@@ -73,12 +72,12 @@ local function shuffle(t)
     return t
 end
 
--- Функция подсчета предметов конкретного типа в инвентаре бота
+-- 🌟 ТУТ ВСЕ ИСПРАВЛЕНО (Добавлено 'in ipairs(inv)')
 local function getInvCount(bot, item_id)
     local inv = safeCall(bot.get_inventory, bot)
     if not inv then return 0 end
     local count = 0
-    for _, item do
+    for _, item in ipairs(inv) do
         if item.id == item_id then
             count = count + (item.amount or 0)
         end
@@ -87,16 +86,15 @@ local function getInvCount(bot, item_id)
 end
 
 -- ============================================================
--- 📡 ФУНКЦИЯ ЖИВОГО ОБНОВЛЕНИЯ ДИСКОРД ТАБЛИЦЫ
+-- 📡 ЖИВОЕ ОБНОВЛЕНИЕ ДИСКОРД ТАБЛИЦЫ
 -- ============================================================
 local function updateDiscordLiveTable()
     if CONFIG.DISCORD_WEBHOOK == "" or CONFIG.DISCORD_WEBHOOK:find("ТВОЙ_ВЕБХУК") or is_discord_sending then return end
     is_discord_sending = true
 
-    -- Формируем шапку текстовой таблицы
     local text = "```\n"
     text = text .. "========================================================================\n"
-    text = text .. "                🤖 LIVE МОНИТОРИНГ ФЕРМЫ (Ultimate v33)               \n"
+    text = text .. "                🤖 LIVE МОНИТОРИНГ ФЕРМЫ (Ultimate v34.1)             \n"
     text = text .. "========================================================================\n"
     text = text .. string.format(" 🌊 Найдено: %-6d | 🔨 Сломано: %-6d | 🏦 На складе: %-6d \n", grand_found, grand_broken, grand_stored)
     text = text .. string.format(" 🔄 Циклов:  %-6d | 📦 Склад:   %d/%-5d  | 🕒 Обновлено: %s\n", total_cycles, global_storage_count, CONFIG.MAX_STORAGE_BOTS, os.date("%H:%M:%S"))
@@ -115,9 +113,8 @@ local function updateDiscordLiveTable()
 
         local world_str = "MENU"
         local coords_str = "-,-"
-        local items_str = "0/0"
+        local items_str = "0"
         local progress_str = "0/8"
-        local total_cleared = 0
 
         if b and st then
             if safeCall(b.state, b) == "InWorld" then
@@ -129,11 +126,10 @@ local function updateDiscordLiveTable()
                 world_str = (st.phase and st.phase:find("storage")) and "GOOSE(склад)" or "В МЕНЮ"
             end
 
-            -- Считаем воду в инвентаре (как блоки, так и семена, если есть разделение)
             local water_count = getInvCount(b, CONFIG.WATER_ID)
             items_str = string.format("%-9d", water_count)
 
-            total_cleared = st.worlds_done or 0
+            local total_cleared = st.worlds_done or 0
             local current_run = st.worlds_cleared_count or 0
             progress_str = string.format("%d/8 [%d]", current_run, total_cleared)
         end
@@ -143,22 +139,16 @@ local function updateDiscordLiveTable()
     end
     text = text .. "========================================================================\n```"
 
-    -- Асинхронный поток отправки во избежание лагов
     runThread(function()
         if not discord_msg_id then
-            -- Если сообщения еще нет, отправляем новое (первый запуск)
             local url = CONFIG.DISCORD_WEBHOOK .. "?wait=true"
-            local payload = { content = text, username = "Farm Monitor v33" }
+            local payload = { content = text, username = "Farm Monitor v34" }
             local success, status, response = string_request("POST", url, {["Content-Type"] = "application/json"}, json_encode(payload))
-            
             if success and status == 200 then
                 local data = json_decode(response)
-                if data and data.id then
-                    discord_msg_id = data.id
-                end
+                if data and data.id then discord_msg_id = data.id end
             end
         else
-            -- Если сообщение уже создано, редактируем его методом PATCH
             local url = CONFIG.DISCORD_WEBHOOK .. "/messages/" .. discord_msg_id
             local payload = { content = text }
             string_request("PATCH", url, {["Content-Type"] = "application/json"}, json_encode(payload))
@@ -222,41 +212,23 @@ local function forceReconnect(b, st, id, reason)
     end
     log("🔌 [", id, "] FORCE RECONNECT: ", reason)
     pcall(b.disconnect, b); pcall(b.connect, b)
-    st.phase = "recover"; st.next_action = now_ms() + 2000
+    st.phase = "recover"; st.next_action = now_ms() + 3000
     st.last_reconnect = now_ms(); st.path_active = false; st.connect_start = 0
     heartbeat(st, id, "Force Reconnect")
 end
 
-local function logStatus()
-    local online, farming, recovering, idle, storage, waiting = 0, 0, 0, 0, 0, 0
-    for _, st in pairs(bot_status_msg) do
-        online = online + 1
-        if st:find("farm") or st:find("scan") then farming = farming + 1
-        elseif st:find("recov") then recovering = recovering + 1
-        elseif st:find("storage") and not st:find("queue") then storage = storage + 1
-        elseif st:find("queue") then waiting = waiting + 1
-        else idle = idle + 1 end
-    end
-    log("+--------------------------------------------+")
-    log("|  🤖 Bots Online  : " .. string.format("%3d", online))
-    log("|  🌊 Water Found  : " .. string.format("%6d", grand_found))
-    log("|  🏦 Total Stored : " .. string.format("%6d", grand_stored))
-    log("|  🔄 Cycles Done  : " .. string.format("%6d", total_cycles))
-    log("|  📦 Storage Slot : " .. global_storage_count .. "/" .. CONFIG.MAX_STORAGE_BOTS)
-    log("+--------------------------------------------+")
-end
-
-log("🌍 Ultimate Farm v33 (Discord Live Table) Started.")
-
--- Сразу же генерируем и отправляем первую таблицу при старте
+log("🌍 Ultimate Farm v34.1 Started.")
 updateDiscordLiveTable()
 last_discord_update = now_ms()
 
 while true do
     local now = now_ms()
-    if now - status_timer > CONFIG.STATUS_LOG_MS then status_timer = now; logStatus() end
     
-    -- 🕒 Проверка таймера Дискорда (каждую минуту)
+    -- 🧹 Очистка мусора памяти
+    collectgarbage("step", 50)
+
+    if now - status_timer > CONFIG.STATUS_LOG_MS then status_timer = now end
+    
     if now - last_discord_update > CONFIG.TABLE_UPDATE_MS then
         last_discord_update = now
         updateDiscordLiveTable()
@@ -297,21 +269,22 @@ while true do
                 st.current_world = string.char(math.random(65,90))
                 for _ = 3, math.random(8,15) do st.current_world = st.current_world .. string.char(math.random(65,90)) end
                 pcall(b.send, b, "Gw", {eID = "", W = st.current_world, WB = 4})
-                st.phase = "gw_sent"; st.next_action = now + 600
+                st.phase = "gw_sent"; st.next_action = now + 600 + math.random(5, 80) 
                 bot_status_msg[id] = "creating"; heartbeat(st, id, "GW Sent")
             else st.phase = "done"; bot_status_msg[id] = "finished" end
 
-        elseif st.phase == "gw_sent" then pcall(b.leave, b); st.phase = "wait_menu"; st.next_action = now + 800
+        elseif st.phase == "gw_sent" then pcall(b.leave, b); st.phase = "wait_menu"; st.next_action = now + 800 + math.random(10, 100)
         elseif st.phase == "wait_menu" and state == "MenuIdle" then
-            pcall(b.warp, b, st.current_world); st.phase = "entering"; st.next_action = now + 2500
+            pcall(b.warp, b, st.current_world); st.phase = "entering"; st.next_action = now + 2500 + math.random(50, 200)
             bot_status_msg[id] = st.is_refreshing and "refreshing" or "entering"
         elseif st.phase == "entering" then
             if state == "InWorld" then pcall(b.set_auto_collect, b, true, 100); st.enter_time = now; st.sync_retries = 0
-                st.phase = "syncing"; st.next_action = now + CONFIG.SYNC_WAIT_MS; bot_status_msg[id] = "syncing"; heartbeat(st, id, "Entered")
+                st.phase = "syncing"; st.next_action = now + CONFIG.SYNC_WAIT_MS + math.random(10, 90)
+                bot_status_msg[id] = "syncing"; heartbeat(st, id, "Entered")
             elseif now - st.next_action > 8000 then forceReconnect(b, st, id, "Enter timeout") end
         elseif st.phase == "syncing" then
             if isValidWorld(safeCall(b.get_world, b)) then st.phase = "scanning"; st.next_action = now; bot_status_msg[id] = "scanning"; heartbeat(st, id, "Synced")
-            else st.next_action = now + 200 end
+            else st.next_action = now + 250 end
         elseif st.phase == "scanning" then
             local w = safeCall(b.get_world, b)
             if isValidWorld(w) then
@@ -335,42 +308,51 @@ while true do
                 if not w or t.x < 0 or t.x >= w.width or t.y < 0 or t.y >= w.height then st.target_idx = st.target_idx + 1; st.task = "move"; st.hits_count = 0; st.next_action = now + 100
                 else
                     if st.task == "move" then
-                        if dist <= 2 then st.task = "hit"; st.hits_count = 0; st.path_active = false; st.next_action = now + CONFIG.HIT_DELAY_MS; heartbeat(st, id, "Arrived")
+                        if dist <= 2 then 
+                            st.task = "hit"; st.hits_count = 0; st.path_active = false; 
+                            st.next_action = now + CONFIG.HIT_DELAY_MS + math.random(-20, 50) 
+                            heartbeat(st, id, "Arrived")
                         elseif not st.path_active then
                             if pcall(b.start_path, b, t.x, t.y) then st.path_active = true; st.path_start = now
                             else st.target_idx = st.target_idx + 1 end
                         else
                             if now - st.path_start > CONFIG.PATH_TIMEOUT_MS then st.path_active = false; st.target_idx = st.target_idx + 1
-                            else st.next_action = now + CONFIG.MOVE_COOLDOWN_MS end
+                            else st.next_action = now + CONFIG.MOVE_COOLDOWN_MS + math.random(-30, 40) end 
                         end
                     elseif st.task == "hit" then
-                        if st.hits_count < 5 then pcall(b.send, b, "HW", {x=t.x, y=t.y, NGVj=0}); st.hits_count = st.hits_count + 1; st.next_action = now + CONFIG.HIT_DELAY_MS
-                        else pcall(b.collectAll, b); grand_broken = grand_broken + 1; st.target_idx = st.target_idx + 1; st.task = "move"; st.hits_count = 0; st.path_active = false; st.next_action = now + CONFIG.COLLECT_WAIT_MS end
+                        if st.hits_count < 5 then 
+                            pcall(b.send, b, "HW", {x=t.x, y=t.y, NGVj=0})
+                            st.hits_count = st.hits_count + 1; 
+                            st.next_action = now + CONFIG.HIT_DELAY_MS + math.random(-25, 45) 
+                        else 
+                            pcall(b.collectAll, b); grand_broken = grand_broken + 1; st.target_idx = st.target_idx + 1; st.task = "move"; st.hits_count = 0; st.path_active = false; 
+                            st.next_action = now + CONFIG.COLLECT_WAIT_MS + math.random(5, 60) 
+                        end
                     end
                 end
             end
 
-        elseif st.phase == "refresh" then pcall(b.leave, b); st.phase = "wait_menu"; st.next_action = now + 1000; bot_status_msg[id] = "refreshing"
+        elseif st.phase == "refresh" then pcall(b.leave, b); st.phase = "wait_menu"; st.next_action = now + 1000 + math.random(0, 100)
         elseif st.phase == "leaving" then
-            if state == "InWorld" then pcall(b.leave, b); st.next_action = now + 1200
+            if state == "InWorld" then pcall(b.leave, b); st.next_action = now + 1200 + math.random(0, 100)
             else
                 pcall(b.set_auto_collect, b, false); st.worlds_done = st.worlds_done + 1; total_cycles = total_cycles + 1
                 st.worlds_cleared_count = (st.worlds_cleared_count or 0) + 1
                 
                 if st.worlds_cleared_count >= CONFIG.WORLDS_BEFORE_DROP then
-                    log("💰 [", id, "] Время склада! (Очищено миров: ", st.worlds_cleared_count, ")")
+                    log("💰 [", id, "] Время склада! (Миров: ", st.worlds_cleared_count, ")")
                     st.storage_farm_world = st.current_world; st.storage_route = allocateStorageRoute()
                     st.storage_walk_step = 0; st.storage_walk_max = st.storage_route.steps
                     st.phase = "storage_leave_farm"; st.next_action = now; st.queue_start_time = 0
                 else 
                     st.phase = "idle"; st.pass = 0; st.is_refreshing = false; st.path_active = false; 
-                    st.next_action = now + 300; bot_status_msg[id] = "idle"; heartbeat(st, id, "Cycle Done") 
+                    st.next_action = now + 300 + math.random(10, 150); bot_status_msg[id] = "idle"; heartbeat(st, id, "Cycle Done") 
                 end
             end
 
         -- ============ ОЧЕРЕДЬ И СБРОС ============
         elseif st.phase == "storage_leave_farm" then 
-            pcall(b.leave, b); st.phase = "storage_wait_menu"; st.next_action = now + 1000
+            pcall(b.leave, b); st.phase = "storage_wait_menu"; st.next_action = now + 1000 + math.random(0, 100)
         elseif st.phase == "storage_wait_menu" then
             if state == "MenuIdle" then
                 if global_storage_count < CONFIG.MAX_STORAGE_BOTS then
@@ -378,7 +360,7 @@ while true do
                     local target = CONFIG.STORAGE_WORLD .. ":" .. st.storage_route.portal_id
                     log("🚀 [", id, "] Входим на склад: ", target, " (Слот ", global_storage_count, "/", CONFIG.MAX_STORAGE_BOTS, ")")
                     pcall(b.join_world, b, target)
-                    st.phase = "storage_wait_join"; st.next_action = now + 3000
+                    st.phase = "storage_wait_join"; st.next_action = now + 3000 + math.random(0, 200)
                     bot_status_msg[id] = "storage_entering"
                 else
                     if st.queue_start_time == 0 then st.queue_start_time = now end
@@ -386,7 +368,7 @@ while true do
                         log("⚠️ [", id, "] Застрял в очереди. Перезагрузка.")
                         forceReconnect(b, st, id, "Queue stuck")
                     else
-                        st.next_action = now + 300
+                        st.next_action = now + 350 
                         bot_status_msg[id] = "storage_queue"
                     end
                 end
@@ -394,7 +376,7 @@ while true do
             
         elseif st.phase == "storage_wait_join" then
             if state == "InWorld" then 
-                st.phase = "storage_move"; st.next_action = now + 200
+                st.phase = "storage_move"; st.next_action = now + 250 + math.random(0, 50)
                 bot_status_msg[id] = "storage_moving"
             elseif now - st.next_action > 4000 then 
                 global_storage_count = math.max(0, global_storage_count - 1)
@@ -405,10 +387,10 @@ while true do
             if st.storage_walk_step < st.storage_walk_max then
                 pcall(b.walk, b, CONFIG.STORAGE_STEP_X, CONFIG.STORAGE_STEP_Y)
                 st.storage_walk_step = st.storage_walk_step + 1
-                st.next_action = now + 120 
+                st.next_action = now + 130 + math.random(-15, 30) 
             else
                 st.drop_retries = 0; st.pending_drop_amount = 0
-                st.phase = "storage_drop"; st.next_action = now + 300 
+                st.phase = "storage_drop"; st.next_action = now + 400 + math.random(10, 100) 
                 bot_status_msg[id] = "storage_dropping"
             end
             
@@ -433,38 +415,38 @@ while true do
                     st.pending_drop_amount = target_item.amount 
                     local inv_type = target_item.inventory_type or 0
                     pcall(b.drop, b, target_item.id, target_item.amount, inv_type)
-                    st.next_action = now + 500 
+                    st.next_action = now + 600 + math.random(10, 150) 
                 end
             else
                 if st.pending_drop_amount > 0 then
                     grand_stored = grand_stored + st.pending_drop_amount
                     st.pending_drop_amount = 0
                 end
-                st.drop_retries = 0; st.phase = "storage_leave_goose"; st.next_action = now + 200
+                st.drop_retries = 0; st.phase = "storage_leave_goose"; st.next_action = now + 250 + math.random(5, 50)
             end
             
         elseif st.phase == "storage_leave_goose" then 
             pcall(b.leave, b)
             global_storage_count = math.max(0, global_storage_count - 1)
-            st.phase = "storage_return_wait"; st.next_action = now + 1000
+            st.phase = "storage_return_wait"; st.next_action = now + 1200 + math.random(0, 100)
             bot_status_msg[id] = "storage_returning"
             
         elseif st.phase == "storage_return_wait" then
             if state == "MenuIdle" then
                 pcall(b.warp, b, st.storage_farm_world)
-                st.phase = "storage_finish"; st.next_action = now + 3000
+                st.phase = "storage_finish"; st.next_action = now + 3000 + math.random(0, 200)
             elseif now - st.next_action > 8000 then st.phase = "recover" end
             
         elseif st.phase == "storage_finish" then
             if state == "InWorld" then
                 pcall(b.set_auto_collect, b, true, 100); st.worlds_cleared_count = 0
-                st.phase = "syncing"; st.next_action = now + 600
+                st.phase = "syncing"; st.next_action = now + 600 + math.random(0, 100)
                 bot_status_msg[id] = "farming"
             elseif now - st.next_action > 3000 then st.phase = "storage_leave_farm"; st.next_action = now + 1000 end
 
         -- ВОССТАНОВЛЕНИЕ
         elseif st.phase == "recover" then
-            if not b:connected() then pcall(b.connect, b); st.next_action = now + 1500; st.connect_start = now
+            if not b:connected() then pcall(b.connect, b); st.next_action = now + 2000; st.connect_start = now
             elseif state == "MenuIdle" and st.current_world ~= "" then
                 pcall(b.warp, b, st.current_world); st.phase = "entering"; st.next_action = now + 2500; heartbeat(st, id, "Recovered")
             elseif state == "InWorld" then st.phase = "syncing"; st.next_action = now; heartbeat(st, id, "Recovered InWorld")
