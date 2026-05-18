@@ -59,7 +59,7 @@ local function smart_warp(portal_id)
         if state == "InWorld" then
             local current_world = bot:get_world_name()
             if current_world and current_world:upper() == target_world_clean:upper() then
-                sleep_ms(500) 
+                sleep_ms(800) -- Даем чуть больше времени на прогрузку координат
                 return true 
             else
                 log(string.format("🌍 Переход из чужого мира в %s", portal_id))
@@ -107,7 +107,6 @@ end
 local function phase_plant()
     log("🌱 Начинаем фазу посадки...")
     
-    -- Проверка ДО захода в мир
     if count_items(2) == 0 then
         if count_items(0) > 0 then
             log("⚠️ Семян 0, но есть блоки. Идем ломать!")
@@ -176,7 +175,6 @@ local function phase_wait()
         if total_tracked > 0 and ready_tracked >= total_tracked then
             break
         elseif total_tracked == 0 then
-            -- Защита от банкротства
             if count_items(2) == 0 and count_items(0) == 0 then
                 log("💀 ПОЛНОЕ БАНКРОТСТВО: Семян нет, блоков нет, грядка пуста. Остановка бота.")
                 while true do sleep_ms(60000) end 
@@ -237,8 +235,7 @@ local function phase_break()
         local blocks_count = count_items(0)
         log("📦 Блоков в инвентаре осталось разрушить: " .. blocks_count)
         
-        -- Теперь ломаем СТРОГО до 0.
-        if blocks_count == 0 then 
+        if blocks_count <= 0 then 
             log("✅ Все блоки из инвентаря успешно разбиты в крошку.")
             break 
         end
@@ -248,15 +245,24 @@ local function phase_break()
         local pos = bot:pos()
         if pos then
             local px, py = pos.tile_x, pos.tile_y
-            local targets = { {px - 1, py}, {px + 1, py}, {px, py + 1} }
+            
+            -- 🔥 ЦЕЛЕВАЯ ЗОНА: 3 блока В РЯД НАД ГОЛОВОЙ (чтобы не задеть портал и пол)
+            -- py это ноги, py-1 это голова, py-2 это блок над головой
+            local targets = { {px - 1, py - 2}, {px, py - 2}, {px + 1, py - 2} }
             
             for _, t in ipairs(targets) do
-                for i = 1, 15 do
+                -- Юзер просил 30 блоков в каждую точку (итого 90 за цикл)
+                for i = 1, 30 do
+                    -- Оптимизация: если блоки кончились посреди цикла - прерываем спам
+                    if blocks_count <= 0 then break end
+                    
                     bot:send("SB", {x = t[1], y = t[2], BlockType = TARGET_ID}) 
                     local packet_hits = HITS_PER_BLOCK + 2 
                     for j = 1, packet_hits do 
                         bot:send("HB", {x = t[1], y = t[2]}) 
                     end
+                    
+                    blocks_count = blocks_count - 1
                 end
             end
             
@@ -295,7 +301,7 @@ end
 -- 🔄 ГЛАВНЫЙ ЦИКЛ БОТА
 -------------------------------------------------
 runThread(function()
-    log("🚀 Фарм-машина v5.8 УСПЕШНО ЗАПУЩЕНА! (Абсолютная защита инвентаря)")
+    log("🚀 Фарм-машина v5.9 УСПЕШНО ЗАПУЩЕНА! (Бережем порталы!)")
     while true do
         local current_phase = safe_storage.get("phase") or "plant"
         
