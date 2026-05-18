@@ -1,8 +1,20 @@
-"🌍 Ultimate Farm v34.1 Started."
-error: runtime error: [string "mirai-executor"]:137: bad argument #2 to 'format' (number expected, got string)
-stack traceback:
-	[C]: in ?
-	[C]: in function 'string.format'
-	[string "mirai-executor"]:137: in local 'updateDiscordLiveTable'
-	[string "mirai-executor"]:221: in main chunk
-error: runtime error: [string "mirai-executor"]:137: bad argument #2 to 'format' (number expected, got string) stack traceback: [C]: in ? [C]: in function 'string.format' [string "mirai-executor"]:137: in local 'updateDiscordLiveTable' [string "mirai-executor"]:221: in main chunk
+@echo off
+echo ============================
+echo Forward 8080 -> 127.0.0.1:8080
+echo ============================
+
+netsh interface portproxy add v4tov4 ^
+listenaddress=0.0.0.0 listenport=8080 ^
+connectaddress=127.0.0.1 connectport=8080
+
+netsh advfirewall firewall add rule ^
+name="Open 8080" dir=in action=allow protocol=TCP localport=8080
+
+echo.
+echo DONE
+echo.
+ipconfig | findstr /i "IPv4"
+echo.
+echo Теперь открой на телефоне:
+echo http://IP_КОМПА:8080
+pause
