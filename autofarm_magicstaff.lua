@@ -1,5 +1,5 @@
--- DEEP NETHER FARMER v2 - FIXED PATHFINDING
--- Uses find_path() with proper background collision detection
+-- DEEP NETHER FARMER - SIMPLE find_path
+-- Direct path from spawn to exit, no segments
 
 local BOT_IDS = getBots()
 if not BOT_IDS or #BOT_IDS == 0 then error("[GLOBAL] No bots") end
@@ -10,17 +10,11 @@ local C = {
     DEEP_NETHER = "DEEPNETHER",
     BASE_WORLDS = { "TEST020", "TEST021", "TEST022" },
     
-    SCROLL_ID = 1467,
-    SCROLL_TYPE = 7,
-    
     EXIT_PKT = "eQEo",
     EXIT_BLOCK = 1502,
     
     LOOP_DELAY = 3000,
-    
-    -- Use find_path but with intermediate waypoints
-    WAYPOINT_DIST = 12,  -- Max distance per find_path call
-    PATH_TIMEOUT = 15000,
+    PATH_TIMEOUT = 20000,
     
     GATES_WAIT = 90000,
     AFTER_GATES_DELAY = 1500,
@@ -68,9 +62,6 @@ local function mk_worker(bot_id, index)
     function w:pos() 
         local p = self.bot:pos() 
         return p.tile_x or 0, p.tile_y or 0 
-    end
-    function w:dst(x1, y1, x2, y2) 
-        return math.abs(x1 - x2) + math.abs(y1 - y2) 
     end
     
     function w:bad_state()
@@ -176,71 +167,7 @@ local function mk_worker(bot_id, index)
         return true
     end
     
-    -- ✅ FIXED: Walk in segments using find_path (checks background!)
-    function w:walk_to_exit_segmented(target_x, target_y)
-        local px, py = self:pos()
-        local total_dist = self:dst(px, py, target_x, target_y)
-        
-        self:log("[WALK] from " .. px .. "," .. py .. " to " .. target_x .. "," .. target_y .. " dist=" .. total_dist)
-        
-        -- If close enough, direct path
-        if total_dist <= C.WAYPOINT_DIST then
-            return self:walk_direct(target_x, target_y, "DIRECT")
-        end
-        
-        -- Calculate intermediate waypoint
-        local ratio = C.WAYPOINT_DIST / total_dist
-        local wx = math.floor(px + (target_x - px) * ratio)
-        local wy = math.floor(py + (target_y - py) * ratio)
-        
-        self:log("[WALK] waypoint " .. wx .. "," .. wy)
-        
-        -- Walk to waypoint
-        if not self:walk_direct(wx, wy, "WAYPOINT") then
-            self:log("[WALK] waypoint failed")
-            return false
-        end
-        
-        -- Recursively continue to target
-        return self:walk_to_exit_segmented(target_x, target_y)
-    end
-    
-    -- ✅ Use find_path which properly checks background/walkable
-    function w:walk_direct(tx, ty, label)
-        local px, py = self:pos()
-        if px == tx and py == ty then return true end
-        
-        self:log("[MOVE] " .. label .. " " .. px .. "," .. py .. " -> " .. tx .. "," .. ty)
-        
-        -- Check if walkable first
-        if not self.bot:isWalkable(tx, ty) then
-            self:log("[MOVE] target not walkable!")
-            return false
-        end
-        
-        -- Use find_path (blocking but checks background properly)
-        local ok, err = pcall(function()
-            self.bot:find_path(tx, ty)
-        end)
-        
-        if not ok then
-            self:log("[MOVE] find_path failed: " .. tostring(err))
-            return false
-        end
-        
-        -- Verify we arrived
-        local ax, ay = self:pos()
-        if ax == tx and ay == ty then
-            self:log("[MOVE] arrived")
-            sleep(200)
-            return true
-        end
-        
-        self:log("[MOVE] path completed but pos=" .. ax .. "," .. ay)
-        sleep(200)
-        return true
-    end
-    
+    -- ✅ SIMPLE: Just one find_path to exit
     function w:walk_to_exit()
         local exit = self:find_exit()
         if not exit then
@@ -248,10 +175,23 @@ local function mk_worker(bot_id, index)
             return false
         end
         
-        self:log("[WALK] exit at " .. exit.x .. "," .. exit.y)
+        local px, py = self:pos()
+        self:log("[WALK] from " .. px .. "," .. py .. " to " .. exit.x .. "," .. exit.y)
         
-        -- Walk in segments using find_path
-        return self:walk_to_exit_segmented(exit.x, exit.y)
+        -- Simple direct find_path
+        local ok, err = pcall(function()
+            self.bot:find_path(exit.x, exit.y)
+        end)
+        
+        if not ok then
+            self:log("[WALK] find_path failed: " .. tostring(err))
+            return false
+        end
+        
+        local ax, ay = self:pos()
+        self:log("[WALK] arrived at " .. ax .. "," .. ay)
+        sleep(300)
+        return true
     end
     
     function w:exit_deep_nether()
@@ -394,8 +334,8 @@ for i = 1, count do
 end
 
 log("========================================")
-log("[GLOBAL] DEEP NETHER FARMER v2 (FIXED)")
-log("[GLOBAL] Using find_path() - checks background!")
+log("[GLOBAL] DEEP NETHER FARMER - SIMPLE")
+log("[GLOBAL] Direct find_path() to exit")
 log("[GLOBAL] bots=" .. count)
 log("========================================")
 
