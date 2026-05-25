@@ -24,7 +24,7 @@ local C = {
     LOOP_DELAY = 3000,
     
     -- Movement: small segments, async
-    MOVE_SEGMENT = 8,        -- max tiles per segment
+    MOVE_SEGMENT = 20,        -- max tiles per segment
     MOVE_POLL = 100,         -- check position every 100ms
     MOVE_TIMEOUT = 12000,    -- timeout per segment
     MOVE_STUCK_MS = 2000,    -- stuck detection
