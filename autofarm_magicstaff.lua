@@ -1,6 +1,5 @@
--- DEEP NETHER FARMER - SIMPLE & FAST
--- Scroll: ConsumableBloodScroll #1467
--- Logic: spawn -> wait gates -> walk to exit (small segments) -> exit -> repeat
+-- DEEP NETHER FARMER v2 - FIXED PATHFINDING
+-- Uses find_path() with proper background collision detection
 
 local BOT_IDS = getBots()
 if not BOT_IDS or #BOT_IDS == 0 then error("[GLOBAL] No bots") end
@@ -8,37 +7,28 @@ if not BOT_IDS or #BOT_IDS == 0 then error("[GLOBAL] No bots") end
 math.randomseed(now_ms())
 
 local C = {
-    -- Deep Nether config
     DEEP_NETHER = "DEEPNETHER",
     BASE_WORLDS = { "TEST020", "TEST021", "TEST022" },
     
-    -- Scroll ID from your screenshot
-    SCROLL_ID = 1467,  -- ConsumableBloodScroll
-    SCROLL_TYPE = 7,   -- Consumable
+    SCROLL_ID = 1467,
+    SCROLL_TYPE = 7,
     
-    -- Exit packets
-    EXIT_PKT = "eQEo",  -- Deep Nether exit
-    EXIT_BLOCK = 1502,  -- DeepNetherExit
+    EXIT_PKT = "eQEo",
+    EXIT_BLOCK = 1502,
     
-    -- No queue - all bots start immediately
     LOOP_DELAY = 3000,
     
-    -- Movement: small segments, async
-    MOVE_SEGMENT = 20,        -- max tiles per segment
-    MOVE_POLL = 100,         -- check position every 100ms
-    MOVE_TIMEOUT = 12000,    -- timeout per segment
-    MOVE_STUCK_MS = 2000,    -- stuck detection
+    -- Use find_path but with intermediate waypoints
+    WAYPOINT_DIST = 12,  -- Max distance per find_path call
+    PATH_TIMEOUT = 15000,
     
-    -- Gates wait
     GATES_WAIT = 90000,
     AFTER_GATES_DELAY = 1500,
     
-    -- Timeouts
     ENTER_TIMEOUT = 40000,
     RETURN_TIMEOUT = 20000,
     CONNECT_TIMEOUT = 20000,
     
-    -- Packets
     PZlO = "PZlO",
     sGha = "sGha",
     ppIX = "ppIX",
@@ -68,7 +58,6 @@ local function mk_worker(bot_id, index)
     w.run_id = 0
     w.gates_seen = false
     w.gates_time = 0
-    w.bad_tiles = {}
     
     w.stat = { runs = 0, completed = 0, failed = 0 }
     
@@ -141,7 +130,6 @@ local function mk_worker(bot_id, index)
         self.gates_seen = false
         self.gates_time = 0
         
-        -- Inject warp packets
         self.bot:send(C.PZlO, {})
         self.bot:send(C.sGha, { zNds = { 0 } })
         self.bot:send(C.ppIX, { UUEW = C.DEEP_NETHER, BaaD = true })
@@ -188,61 +176,71 @@ local function mk_worker(bot_id, index)
         return true
     end
     
-    -- Move in small async segments
-    function w:move_segment(tx, ty)
+    -- ✅ FIXED: Walk in segments using find_path (checks background!)
+    function w:walk_to_exit_segmented(target_x, target_y)
         local px, py = self:pos()
-        local dist = self:dst(px, py, tx, ty)
+        local total_dist = self:dst(px, py, target_x, target_y)
         
-        if dist == 0 then return true end
+        self:log("[WALK] from " .. px .. "," .. py .. " to " .. target_x .. "," .. target_y .. " dist=" .. total_dist)
         
-        -- Calculate intermediate point
-        local step = math.min(dist, C.MOVE_SEGMENT)
-        local ratio = step / dist
-        local ix = math.floor(px + (tx - px) * ratio)
-        local iy = math.floor(py + (ty - py) * ratio)
-        
-        -- Check if already there
-        local cx, cy = self:pos()
-        if cx == ix and cy == iy then return true end
-        
-        -- Start async path
-        pcall(function() self.bot:start_path(ix, iy) end)
-        
-        -- Poll until reached or timeout
-        local dl = now() + C.MOVE_TIMEOUT
-        local last_x, last_y = cx, cy
-        local last_move = now()
-        
-        while now() < dl do
-            if not self:alive() then return false end
-            
-            cx, cy = self:pos()
-            
-            -- Check if reached intermediate point
-            if cx == ix and cy == iy then
-                return true
-            end
-            
-            -- Check progress
-            if cx ~= last_x or cy ~= last_y then
-                last_x, last_y = cx, cy
-                last_move = now()
-            end
-            
-            -- Stuck detection
-            if now() - last_move > C.MOVE_STUCK_MS then
-                self:log("[MOVE] stuck at " .. cx .. "," .. cy)
-                return false
-            end
-            
-            sleep(C.MOVE_POLL)
+        -- If close enough, direct path
+        if total_dist <= C.WAYPOINT_DIST then
+            return self:walk_direct(target_x, target_y, "DIRECT")
         end
         
-        self:log("[MOVE] timeout to " .. ix .. "," .. iy)
-        return false
+        -- Calculate intermediate waypoint
+        local ratio = C.WAYPOINT_DIST / total_dist
+        local wx = math.floor(px + (target_x - px) * ratio)
+        local wy = math.floor(py + (target_y - py) * ratio)
+        
+        self:log("[WALK] waypoint " .. wx .. "," .. wy)
+        
+        -- Walk to waypoint
+        if not self:walk_direct(wx, wy, "WAYPOINT") then
+            self:log("[WALK] waypoint failed")
+            return false
+        end
+        
+        -- Recursively continue to target
+        return self:walk_to_exit_segmented(target_x, target_y)
     end
     
-    -- Walk from spawn to exit in segments
+    -- ✅ Use find_path which properly checks background/walkable
+    function w:walk_direct(tx, ty, label)
+        local px, py = self:pos()
+        if px == tx and py == ty then return true end
+        
+        self:log("[MOVE] " .. label .. " " .. px .. "," .. py .. " -> " .. tx .. "," .. ty)
+        
+        -- Check if walkable first
+        if not self.bot:isWalkable(tx, ty) then
+            self:log("[MOVE] target not walkable!")
+            return false
+        end
+        
+        -- Use find_path (blocking but checks background properly)
+        local ok, err = pcall(function()
+            self.bot:find_path(tx, ty)
+        end)
+        
+        if not ok then
+            self:log("[MOVE] find_path failed: " .. tostring(err))
+            return false
+        end
+        
+        -- Verify we arrived
+        local ax, ay = self:pos()
+        if ax == tx and ay == ty then
+            self:log("[MOVE] arrived")
+            sleep(200)
+            return true
+        end
+        
+        self:log("[MOVE] path completed but pos=" .. ax .. "," .. ay)
+        sleep(200)
+        return true
+    end
+    
     function w:walk_to_exit()
         local exit = self:find_exit()
         if not exit then
@@ -252,32 +250,8 @@ local function mk_worker(bot_id, index)
         
         self:log("[WALK] exit at " .. exit.x .. "," .. exit.y)
         
-        local px, py = self:pos()
-        local total_dist = self:dst(px, py, exit.x, exit.y)
-        
-        self:log("[WALK] from " .. px .. "," .. py .. " dist=" .. total_dist)
-        
-        -- Move in segments
-        while true do
-            if not self:alive() or not self:is_deep_nether() then
-                return false
-            end
-            
-            px, py = self:pos()
-            local remaining = self:dst(px, py, exit.x, exit.y)
-            
-            -- Reached exit area
-            if remaining <= 2 then
-                self:log("[WALK] reached exit area")
-                return true
-            end
-            
-            -- Move one segment
-            if not self:move_segment(exit.x, exit.y) then
-                self:log("[WALK] segment failed, retrying...")
-                sleep(500)
-            end
-        end
+        -- Walk in segments using find_path
+        return self:walk_to_exit_segmented(exit.x, exit.y)
     end
     
     function w:exit_deep_nether()
@@ -289,14 +263,12 @@ local function mk_worker(bot_id, index)
         
         self:log("[EXIT] sending " .. C.EXIT_PKT .. " at " .. exit.x .. "," .. exit.y)
         
-        -- Send exit packet
         pcall(function() 
             self.bot:send(C.EXIT_PKT, { x = exit.x, y = exit.y }) 
         end)
         
         sleep(300)
         
-        -- Warp back to base
         self:log("[EXIT] warping to " .. self.base)
         pcall(function() self.bot:warp(self.base, false) end)
         
@@ -310,7 +282,7 @@ local function mk_worker(bot_id, index)
             sleep(500)
         end
         
-        self:log("[EXIT] timeout waiting for base")
+        self:log("[EXIT] timeout")
         return false
     end
     
@@ -321,10 +293,6 @@ local function mk_worker(bot_id, index)
         
         self:log("=== RUN " .. self.run_id .. " ===")
         
-        -- Reset state
-        self.bad_tiles = {}
-        
-        -- 1. Ensure in base world
         if not self:warp_base() then
             self:log("[RUN] failed to warp to base")
             self.stat.failed = self.stat.failed + 1
@@ -332,7 +300,6 @@ local function mk_worker(bot_id, index)
             return false
         end
         
-        -- 2. Enter Deep Nether
         if not self:enter_deep_nether() then
             self:log("[RUN] failed to enter Deep Nether")
             self.stat.failed = self.stat.failed + 1
@@ -340,7 +307,6 @@ local function mk_worker(bot_id, index)
             return false
         end
         
-        -- 3. Wait for gates
         if not self:wait_gates() then
             self:log("[RUN] gates wait failed")
             self.stat.failed = self.stat.failed + 1
@@ -348,7 +314,6 @@ local function mk_worker(bot_id, index)
             return false
         end
         
-        -- 4. Walk to exit (in segments)
         if not self:walk_to_exit() then
             self:log("[RUN] walk to exit failed")
             self.stat.failed = self.stat.failed + 1
@@ -356,7 +321,6 @@ local function mk_worker(bot_id, index)
             return false
         end
         
-        -- 5. Exit
         if not self:exit_deep_nether() then
             self:log("[RUN] exit failed")
             self.stat.failed = self.stat.failed + 1
@@ -364,7 +328,6 @@ local function mk_worker(bot_id, index)
             return false
         end
         
-        -- Success
         self.stat.completed = self.stat.completed + 1
         GLOBAL.completed = GLOBAL.completed + 1
         self:log("[DONE] completed! runs=" .. self.stat.runs .. " ok=" .. self.stat.completed)
@@ -373,30 +336,24 @@ local function mk_worker(bot_id, index)
     end
     
     function w:install()
-        -- Clear old handlers
         pcall(function() self.bot:off(events.PACKET_RECEIVED) end)
         pcall(function() self.bot:off(events.STATE_CHANGED) end)
         
-        -- Packet listener
         self.bot:on(events.PACKET_RECEIVED, function(pkt)
             if not pkt or not pkt.ids then return end
             
             for _, id in ipairs(pkt.ids) do
-                -- Gates opened
                 if id == C.jcpA then
                     self.gates_seen = true
                     self.gates_time = now()
                     self:log("[PACKET] gates opened (jcpA)")
                 end
-                
-                -- Warp confirmed
                 if id == "rwAQ" then
                     self:log("[PACKET] warp confirmed (rwAQ)")
                 end
             end
         end)
         
-        -- State changes
         self.bot:on(events.STATE_CHANGED, function(data)
             self:log("[STATE] " .. data.state)
         end)
@@ -404,7 +361,7 @@ local function mk_worker(bot_id, index)
     
     function w:loop()
         self:install()
-        self:log("[START] worker started (no queue)")
+        self:log("[START] worker started")
         
         while true do
             local ok, err = pcall(function()
@@ -417,7 +374,6 @@ local function mk_worker(bot_id, index)
                 self:log("[ERROR] " .. tostring(err))
             end
             
-            -- Ensure back in base
             if not self:alive() or self:world() ~= self.base then
                 self:log("[LOOP] recovering to base...")
                 self:warp_base()
@@ -430,42 +386,31 @@ local function mk_worker(bot_id, index)
     return w
 end
 
--- Create workers
 local count = math.min(#BOT_IDS, C.MAX_BOTS)
 for i = 1, count do
     local w = mk_worker(BOT_IDS[i], i)
     workers[BOT_IDS[i]] = w
-    w:log("[INIT] base=" .. w.base .. " scroll=ConsumableBloodScroll #1467")
+    w:log("[INIT] base=" .. w.base)
 end
 
 log("========================================")
-log("[GLOBAL] DEEP NETHER FARMER")
+log("[GLOBAL] DEEP NETHER FARMER v2 (FIXED)")
+log("[GLOBAL] Using find_path() - checks background!")
 log("[GLOBAL] bots=" .. count)
-log("[GLOBAL] scroll=ConsumableBloodScroll #1467")
-log("[GLOBAL] logic: spawn -> gates -> walk(segments) -> exit -> repeat")
-log("[GLOBAL] NO QUEUE - all bots run simultaneously")
 log("========================================")
 
--- Start all workers immediately (no queue)
 for i = 1, count do
-    local w = workers[BOT_IDS[i]]
     runThread(function()
-        w:loop()
+        workers[BOT_IDS[i]]:loop()
     end)
 end
 
--- Stats thread
 runThread(function()
     while true do
         sleep(60000)
-        log("========================================")
         log("[STATS] runs=" .. GLOBAL.runs .. " completed=" .. GLOBAL.completed .. " failed=" .. GLOBAL.failed)
-        log("========================================")
     end
 end)
 
--- Keep main thread alive
-while true do
-    sleep(1000)
-end
+while true do sleep(1000) end
 
