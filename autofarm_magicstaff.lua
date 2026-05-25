@@ -1,5 +1,5 @@
--- DEEP NETHER FARMER - SIMPLE find_path
--- Direct path from spawn to exit, no segments
+-- DEEP NETHER FARMER - FIXED EXIT & KICK ISSUES
+-- Proper exit packet handling + delays
 
 local BOT_IDS = getBots()
 if not BOT_IDS or #BOT_IDS == 0 then error("[GLOBAL] No bots") end
@@ -13,15 +13,20 @@ local C = {
     EXIT_PKT = "eQEo",
     EXIT_BLOCK = 1502,
     
-    LOOP_DELAY = 3000,
-    PATH_TIMEOUT = 20000,
+    LOOP_DELAY = 5000,  -- Increased delay between runs
+    
+    PATH_TIMEOUT = 25000,
     
     GATES_WAIT = 90000,
     AFTER_GATES_DELAY = 1500,
     
     ENTER_TIMEOUT = 40000,
-    RETURN_TIMEOUT = 20000,
+    RETURN_TIMEOUT = 25000,
     CONNECT_TIMEOUT = 20000,
+    
+    -- Exit timing
+    EXIT_SEND_DELAY = 800,     -- Wait after sending exit packet
+    EXIT_WARP_DELAY = 1200,    -- Wait before warping after exit
     
     PZlO = "PZlO",
     sGha = "sGha",
@@ -52,6 +57,7 @@ local function mk_worker(bot_id, index)
     w.run_id = 0
     w.gates_seen = false
     w.gates_time = 0
+    w.exit_sent = false
     
     w.stat = { runs = 0, completed = 0, failed = 0 }
     
@@ -93,6 +99,7 @@ local function mk_worker(bot_id, index)
             local dl = now() + C.RETURN_TIMEOUT
             while now() < dl do
                 if self:state() == "InWorld" and self:world() == self.base then
+                    sleep(500)  -- Settle time
                     return true
                 end
                 if self:bad_state() then self:try_connect() end
@@ -120,6 +127,7 @@ local function mk_worker(bot_id, index)
         
         self.gates_seen = false
         self.gates_time = 0
+        self.exit_sent = false
         
         self.bot:send(C.PZlO, {})
         self.bot:send(C.sGha, { zNds = { 0 } })
@@ -131,6 +139,7 @@ local function mk_worker(bot_id, index)
         while now() < dl do
             sleep(500)
             if self:alive() and self:is_deep_nether() then
+                sleep(1000)  -- Settle after enter
                 self:log("[ENTER] success")
                 return true
             end
@@ -167,7 +176,6 @@ local function mk_worker(bot_id, index)
         return true
     end
     
-    -- ✅ SIMPLE: Just one find_path to exit
     function w:walk_to_exit()
         local exit = self:find_exit()
         if not exit then
@@ -178,7 +186,6 @@ local function mk_worker(bot_id, index)
         local px, py = self:pos()
         self:log("[WALK] from " .. px .. "," .. py .. " to " .. exit.x .. "," .. exit.y)
         
-        -- Simple direct find_path
         local ok, err = pcall(function()
             self.bot:find_path(exit.x, exit.y)
         end)
@@ -190,7 +197,7 @@ local function mk_worker(bot_id, index)
         
         local ax, ay = self:pos()
         self:log("[WALK] arrived at " .. ax .. "," .. ay)
-        sleep(300)
+        sleep(500)  -- Settle at exit
         return true
     end
     
@@ -201,13 +208,27 @@ local function mk_worker(bot_id, index)
             return false
         end
         
-        self:log("[EXIT] sending " .. C.EXIT_PKT .. " at " .. exit.x .. "," .. exit.y)
+        self:log("[EXIT] at pos " .. tostring(self:pos()))
+        self:log("[EXIT] sending " .. C.EXIT_PKT .. " x=" .. exit.x .. " y=" .. exit.y)
         
+        -- Send exit packet
         pcall(function() 
             self.bot:send(C.EXIT_PKT, { x = exit.x, y = exit.y }) 
         end)
         
-        sleep(300)
+        self.exit_sent = true
+        
+        -- ✅ Wait for server to process exit packet
+        self:log("[EXIT] waiting " .. C.EXIT_SEND_DELAY .. "ms for server...")
+        sleep(C.EXIT_SEND_DELAY)
+        
+        -- Check if still in Deep Nether
+        if self:is_deep_nether() then
+            self:log("[EXIT] still in Deep Nether, warping to base...")
+        end
+        
+        -- ✅ Wait before warping
+        sleep(C.EXIT_WARP_DELAY)
         
         self:log("[EXIT] warping to " .. self.base)
         pcall(function() self.bot:warp(self.base, false) end)
@@ -215,14 +236,18 @@ local function mk_worker(bot_id, index)
         local dl = now() + C.RETURN_TIMEOUT
         while now() < dl do
             if self:alive() and self:world() == self.base then
+                sleep(500)  -- Settle
                 self:log("[EXIT] arrived at base")
                 return true
             end
-            if self:bad_state() then self:try_connect() end
+            if self:bad_state() then 
+                self:log("[EXIT] bad state, reconnecting...")
+                self:try_connect() 
+            end
             sleep(500)
         end
         
-        self:log("[EXIT] timeout")
+        self:log("[EXIT] timeout waiting for base, state=" .. self:state())
         return false
     end
     
@@ -232,6 +257,10 @@ local function mk_worker(bot_id, index)
         GLOBAL.runs = GLOBAL.runs + 1
         
         self:log("=== RUN " .. self.run_id .. " ===")
+        self:log_state("[RUN] start")
+        
+        -- Reset flags
+        self.exit_sent = false
         
         if not self:warp_base() then
             self:log("[RUN] failed to warp to base")
@@ -239,6 +268,8 @@ local function mk_worker(bot_id, index)
             GLOBAL.failed = GLOBAL.failed + 1
             return false
         end
+        
+        sleep(1000)  -- Settle in base
         
         if not self:enter_deep_nether() then
             self:log("[RUN] failed to enter Deep Nether")
@@ -271,8 +302,14 @@ local function mk_worker(bot_id, index)
         self.stat.completed = self.stat.completed + 1
         GLOBAL.completed = GLOBAL.completed + 1
         self:log("[DONE] completed! runs=" .. self.stat.runs .. " ok=" .. self.stat.completed)
+        self:log_state("[DONE] end")
         
         return true
+    end
+    
+    function w:log_state(tag)
+        local x, y = self:pos()
+        self:log(tag .. " state=" .. self:state() .. " world=" .. self:world() .. " pos=" .. x .. "," .. y)
     end
     
     function w:install()
@@ -290,6 +327,9 @@ local function mk_worker(bot_id, index)
                 end
                 if id == "rwAQ" then
                     self:log("[PACKET] warp confirmed (rwAQ)")
+                end
+                if id == "Cggg" then
+                    self:log("[PACKET] respawn (Cggg)")
                 end
             end
         end)
@@ -314,11 +354,13 @@ local function mk_worker(bot_id, index)
                 self:log("[ERROR] " .. tostring(err))
             end
             
+            -- Ensure back in base
             if not self:alive() or self:world() ~= self.base then
                 self:log("[LOOP] recovering to base...")
                 self:warp_base()
             end
             
+            self:log("[LOOP] sleep " .. C.LOOP_DELAY .. "ms")
             sleep(C.LOOP_DELAY)
         end
     end
@@ -334,8 +376,8 @@ for i = 1, count do
 end
 
 log("========================================")
-log("[GLOBAL] DEEP NETHER FARMER - SIMPLE")
-log("[GLOBAL] Direct find_path() to exit")
+log("[GLOBAL] DEEP NETHER FARMER - FIXED")
+log("[GLOBAL] Proper exit packet handling")
 log("[GLOBAL] bots=" .. count)
 log("========================================")
 
@@ -348,7 +390,9 @@ end
 runThread(function()
     while true do
         sleep(60000)
+        log("========================================")
         log("[STATS] runs=" .. GLOBAL.runs .. " completed=" .. GLOBAL.completed .. " failed=" .. GLOBAL.failed)
+        log("========================================")
     end
 end)
 
